@@ -65,6 +65,10 @@ checking, LiteX-compatible per-lane SEC-DED codecs, saturating ECC status
 counters, and a fixed-window bandwidth monitor. Their remaining control-plane,
 bypass, and read-modify-write variants are tracked in P8.
 
+The DFI layer exposes the standard DDR4 `act_n` signal and includes a DDR4
+command mux plus a hardware/external/software injector with per-phase read-data
+capture. Rate conversion and the initialization/SPD stack remain P9 work.
+
 ## Build and test
 
 Requirements: JDK 11+ and sbt 2.0.6 (the project launcher version).

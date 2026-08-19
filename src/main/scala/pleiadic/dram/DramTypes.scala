@@ -131,6 +131,7 @@ class DfiPhase(config: DramConfig) extends Bundle {
   val rasN = Bool()
   val casN = Bool()
   val weN = Bool()
+  val actN = Bool()
   val cke = Vec(config.nranks, Bool())
   val odt = Vec(config.nranks, Bool())
   val resetN = Bool()
@@ -145,6 +146,11 @@ class DfiPhase(config: DramConfig) extends Bundle {
 /** Multi-phase DFI interface, analogous to litedram.phy.dfi.Interface. */
 class DfiInterface(config: DramConfig) extends Bundle {
   val phases = Vec(config.nPhases, new DfiPhase(config))
+}
+
+class DfiReadResponse(config: DramConfig) extends Bundle {
+  val data = UInt(config.dfiDataBits.W)
+  val valid = Bool()
 }
 
 class NativeCommand(config: DramConfig) extends Bundle {

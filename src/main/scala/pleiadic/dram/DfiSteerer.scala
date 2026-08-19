@@ -23,6 +23,7 @@ class DfiSteerer(config: DramConfig, commandPhase: Int = 0, dataPhase: Int = 0) 
     phase.rasN := true.B
     phase.casN := true.B
     phase.weN := true.B
+    phase.actN := true.B
     phase.resetN := true.B
   }
 
