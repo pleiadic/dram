@@ -82,6 +82,11 @@ device catalog contains all 74 concrete modules from the pinned `modules.py`,
 including geometry, registered-module flags, speedgrades, and fine-refresh
 timing variants, and can convert a selected entry directly to `DramTiming`.
 
+PHY work has started with a portable full-rate Generic SDR implementation. It
+forwards the single DFI phase to pad-side command/address signals, gates DQ/DM
+on write enable, and aligns read-valid to `CL + 1`; FPGA-specific I/O cells are
+left to thin outer wrappers.
+
 ## Build and test
 
 Requirements: JDK 11+ and sbt 2.0.6 (the project launcher version).
