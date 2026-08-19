@@ -73,8 +73,9 @@ SDR, DDR3, and DDR4 golden tables and also covers DDR, LPDDR, and DDR2. C/Scala
 text export is available. The DDR3/DDR4 SPD decoder accepts Micron reference
 CSV or LiteX BIOS hexdumps and extracts geometry, speedgrade, and timing data.
 It also converts mixed CK/ns constraints into controller cycles using the same
-rate margin and refresh exception as LiteDRAM. LPDDR4/5 and RPC initialization
-and the static device catalog remain P9 work.
+rate margin and refresh exception as LiteDRAM. RPC mode-register encoding and
+its reset/special-command/ZQ initialization sequence are covered. LPDDR4/5
+initialization and the static device catalog remain P9 work.
 
 ## Build and test
 

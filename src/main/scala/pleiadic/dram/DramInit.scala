@@ -78,6 +78,7 @@ object DramInit {
       case "LPDDR" => ddrLike(settings, lpddr = true)
       case "DDR2" => ddr2(settings)
       case "DDR3" => ddr3(settings, timing)
+      case "RPC" => rpc(settings)
       case "DDR4" => ddr4(settings, timing)
       case other => throw new IllegalArgumentException(
         s"initialization sequence for $other is not implemented")
@@ -176,6 +177,43 @@ object DramInit {
         command = modeRegister, delay = 200),
       step("ZQ Calibration", 0x400, command = zqCalibration, delay = 200))
     DramInitResult(steps, Map(1 -> BigInt(mr1)))
+  }
+
+  private val rpcCl = Map(8 -> 0, 10 -> 1, 11 -> 2, 13 -> 3, 3 -> 6)
+  private val rpcNwr = Map(4 -> 0, 6 -> 1, 7 -> 2, 8 -> 3, 10 -> 4,
+    12 -> 5, 14 -> 6, 16 -> 7)
+  private val rpcZout = Map("120ohm" -> 2, "90ohm" -> 4, "51.4ohm" -> 6,
+    "60ohm" -> 8, "40ohm" -> 10, "36ohm" -> 12, "27.7ohm" -> 14,
+    "short" -> 1, "open" -> 0)
+  private val rpcOdt = Map("60ohm" -> 1, "45ohm" -> 2, "25.7ohm" -> 3,
+    "30ohm" -> 4, "20ohm" -> 5, "18ohm" -> 6, "13.85ohm" -> 7,
+    "open" -> 0)
+
+  private def rpc(settings: DramInitSettings): DramInitResult = {
+    require(settings.casLatency == settings.writeLatency,
+      "RPC requires equal read and write latency")
+    // LiteDRAM's RPC PHY adds one cycle of additive latency.
+    val cl = settings.casLatency - 1
+    val encodedCl = lookup("RPC CL", cl, rpcCl)
+    lookup("RPC nWR", 8, rpcNwr) // Encoded in the packet, not in DFI address bits.
+    val zout = lookup("RPC ZOUT", settings.ron.getOrElse("60ohm"), rpcZout)
+    val odt = lookup("RPC ODT", settings.rttNom.getOrElse("30ohm"), rpcOdt)
+    val modeAddress = encodedCl | (zout << 3) | (odt << 7)
+    val modeBank = 1 // ODT_STB=1; CSR_FX=0 and ODT_PD=0.
+    def delay(seconds: Double): Int = math.ceil(seconds * 200e6).toInt
+    DramInitResult(Seq(
+      step("Stabilize clocks", command = unreset, delay = delay(200e-6)),
+      step("Hold CS# low", command = commandChipSelect, delay = delay(100e-9)),
+      step("RPC special commands: ON", command = controlOdt, delay = delay(100e-9)),
+      step("PU RESET sequence (ACT)", command = commandRowStrobe | commandChipSelect,
+        delay = delay(5e-6)),
+      step("RPC special commands: OFF", command = unreset, delay = delay(100e-9)),
+      step("Precharge ALL", 0x400, command = prechargeAll, delay = delay(100e-9)),
+      step(s"Load Mode Register: CL=$cl", modeAddress, modeBank,
+        modeRegister, delay(100e-9)),
+      step("RPC special commands: ON", command = controlOdt, delay = delay(100e-9)),
+      step("ZQ Init Calibration", 0x400, command = zqCalibration, delay = delay(1e-6)),
+      step("RPC special commands: OFF", command = unreset, delay = delay(100e-9))))
   }
 
   private val ddr4Cl = Map(9 -> 0, 10 -> 1, 11 -> 2, 12 -> 3,

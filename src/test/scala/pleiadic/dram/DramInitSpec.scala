@@ -67,11 +67,31 @@ class DramInitSpec extends AnyFlatSpec with Matchers {
     ddr2.steps.takeRight(2).map(_.address) shouldBe Seq(BigInt(896), BigInt(0))
   }
 
+  it should "match the LiteDRAM RPC initialization sequence" in {
+    val result = DramInit.generate(DramInitSettings("RPC", casLatency = 9,
+      writeLatency = 9), timing)
+    result.steps shouldBe Seq(
+      DramInitStep("Stabilize clocks", 0, 0, unreset, 40000),
+      DramInitStep("Hold CS# low", 0, 0, commandChipSelect, 20),
+      DramInitStep("RPC special commands: ON", 0, 0, controlOdt, 20),
+      DramInitStep("PU RESET sequence (ACT)", 0, 0,
+        commandRowStrobe | commandChipSelect, 1001),
+      DramInitStep("RPC special commands: OFF", 0, 0, unreset, 20),
+      DramInitStep("Precharge ALL", 1024, 0, prechargeAll, 20),
+      DramInitStep("Load Mode Register: CL=8", 576, 1, modeRegister, 20),
+      DramInitStep("RPC special commands: ON", 0, 0, controlOdt, 20),
+      DramInitStep("ZQ Init Calibration", 1024, 0, zqCalibration, 200),
+      DramInitStep("RPC special commands: OFF", 0, 0, unreset, 20))
+    result.modeRegisters shouldBe empty
+  }
+
   it should "reject mode-register encodings outside the JEDEC tables" in {
     an[IllegalArgumentException] should be thrownBy
       DramInit.generate(DramInitSettings("DDR4", 8, writeLatency = 9), timing)
     an[IllegalArgumentException] should be thrownBy
       DramInit.generate(DramInitSettings("LPDDR4", 14, writeLatency = 8), timing)
+    an[IllegalArgumentException] should be thrownBy
+      DramInit.generate(DramInitSettings("RPC", 9, writeLatency = 8), timing)
   }
 
   it should "export deterministic C and Scala initialization tables" in {
