@@ -46,13 +46,13 @@ class DramController(val config: DramConfig) extends Module {
   private val reqReg = Reg(new DramRequest(config))
   private val respReg = Reg(new DramResponse(config))
   private val responseValid = RegInit(false.B)
-  private val selectedBank = reqReg.address(byteOffset + bankWidth - 1, byteOffset)
-  private val selectedColumn = reqReg.address(byteOffset + bankWidth + colWidth - 1, byteOffset + bankWidth)
+  private val selectedColumn = reqReg.address(byteOffset + colWidth - 1, byteOffset)
+  private val selectedBank = reqReg.address(byteOffset + colWidth + bankWidth - 1, byteOffset + colWidth)
   private val rowLsb = byteOffset + bankWidth + colWidth
   private val wordMsb = rowLsb + rowWidth - 1
   private val selectedRow = reqReg.address(wordMsb, rowLsb)
   private val wordAddress = reqReg.address(wordMsb, byteOffset)
-  private val incomingBank = io.request.bits.address(byteOffset + bankWidth - 1, byteOffset)
+  private val incomingBank = io.request.bits.address(byteOffset + colWidth + bankWidth - 1, byteOffset + colWidth)
   private val incomingRow = io.request.bits.address(wordMsb, rowLsb)
   private val bankIndex = selectedBank
 
@@ -68,6 +68,8 @@ class DramController(val config: DramConfig) extends Module {
     io.command.valid := true.B
     io.command.bits.command := commandType
     io.command.bits.allBanks := allBanks
+    io.command.bits.autoPrecharge := false.B
+    io.command.bits.rank := 0.U
     io.command.bits.bank := Mux(allBanks || commandType === DramCommandType.refresh, 0.U, selectedBank)
     io.command.bits.row := Mux(commandType === DramCommandType.activate, selectedRow, 0.U)
     io.command.bits.column := Mux(commandType === DramCommandType.read || commandType === DramCommandType.write, selectedColumn, 0.U)

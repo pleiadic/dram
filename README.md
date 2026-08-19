@@ -1,10 +1,14 @@
 # Pleiadic Chisel DRAM
 
-This directory is a standalone Chisel implementation of the portable part of
-[LiteDRAM](../../litex/litedram). It is deliberately independent of FPGA
-vendor primitives: `DramController` emits a simple command stream that can be
-connected to a DFI/PHY adapter, while its internal memory array provides a
-useful simulation reference model.
+This directory is an in-progress Chisel reconstruction of
+[LiteDRAM](../../litex/litedram). The detailed parity matrix and staged
+acceptance criteria are in [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md).
+
+The new synthesizable control path is decomposed into `BankMachine`,
+`Refresher`, `CommandChooser`, `Multiplexer`, `LiteDramController`, and
+`LiteDramCrossbar`, with `LiteDramCore` as the integrated abstract command/data
+top level. The original single-request `DramController` is temporarily retained
+as a compatibility/reference model while the simulation PHY is built.
 
 ## LiteDRAM analysis
 
@@ -27,17 +31,30 @@ The Chisel core maps these responsibilities as follows:
 
 | LiteDRAM behavior | Chisel implementation |
 | --- | --- |
-| BankMachine open-row tracking | `openValid`/`openRow` and row-miss FSM |
-| ACT/PRE insertion | `stateActivate`, `statePrecharge` |
-| Column arbitration interface | Decoupled `command` stream |
-| RefreshTimer/RefreshExecuter | `refreshTimer` and refresh FSM states |
-| User LiteDRAM interface | Decoupled `request`/`response` |
-| DFI and vendor PHY | Intentionally left as an adapter boundary |
+| BankMachine open-row tracking | `BankMachine` per rank/bank |
+| ACT/PRE insertion and local timings | `BankMachine` |
+| Command arbitration/global timings | `CommandChooser` + `Multiplexer` |
+| RefreshTimer/Sequencer | `Refresher` + `RefreshSequencer` |
+| Multi-master command routing | `LiteDramCommandCrossbar` |
+| Ordered native data routing | `LiteDramDataCrossbar` |
+| Controller composition | `LiteDramController` |
+| Integrated native core | `LiteDramCore` |
+| Compatibility simulation model | `DramController` |
+| DFI command encoding | `DfiSteerer` |
 
-This is a portable behavioral/synthesizable core, not a drop-in replacement
-for every LiteDRAM PHY. Multi-bank scheduling is represented by the command
-stream and can be extended with a round-robin queue when a frontend needs
-multiple outstanding requests.
+This is not yet a drop-in replacement for LiteDRAM. In particular, native
+width conversion/CDC, bus frontends, PHY-latency-aligned DFI data, init/SPD,
+and PHY families remain tracked work in the development plan.
+
+The frontend layer currently includes functional Native up/down width
+conversion, a Gray-pointer asynchronous Native CDC, and an equal-width
+Wishbone classic bridge. Avalon-MM, AXI4, and burst-specific optimizations are
+the next development stage.
+
+The asynchronous FIFO regression uses Verilator and derived clocks with
+different periods. ChiselTest 6 requires a local `WData` compatibility define
+when used with Verilator 5.050 or newer; the define is scoped to the test C++
+harness and does not alter generated RTL.
 
 ## Build and test
 
