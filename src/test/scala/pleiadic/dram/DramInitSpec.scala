@@ -73,4 +73,19 @@ class DramInitSpec extends AnyFlatSpec with Matchers {
     an[IllegalArgumentException] should be thrownBy
       DramInit.generate(DramInitSettings("LPDDR4", 14, writeLatency = 8), timing)
   }
+
+  it should "export deterministic C and Scala initialization tables" in {
+    val result = DramInit.generate(DramInitSettings("DDR3", 7,
+      writeLatency = 6, nPhases = 4), timing)
+    val c = DramInitExport.toC(result, "ddr3-init")
+    c should include("#define DDR3_INIT_MR1 0x6")
+    c should include("static const dram_init_step_t ddr3_init[]")
+    c should include("{ 0x208, 2, 0xf, 0 }, /* Load Mode Register 2, CWL=6 */")
+    c should include("ddr3_init_count = 7")
+
+    val scala = DramInitExport.toScala(result, "Ddr3Generated")
+    scala should include("object Ddr3Generated")
+    scala should include("DramInitStep(\"ZQ Calibration\", BigInt(\"1024\"), 0, 3, 200)")
+    scala should include("modeRegisters = Map(1 -> BigInt(\"6\"))")
+  }
 }

@@ -70,8 +70,10 @@ command mux, a hardware/external/software injector with per-phase read-data
 capture, a related-clock rate converter, and a phase-granular timing checker.
 The pure Scala initialization generator currently matches the repository's
 SDR, DDR3, and DDR4 golden tables and also covers DDR, LPDDR, and DDR2. C/Scala
-text export, LPDDR4/5 and RPC initialization, SPD parsing, and the device
-catalog remain P9 work.
+text export is available. The DDR3/DDR4 SPD decoder accepts Micron reference
+CSV or LiteX BIOS hexdumps and extracts geometry, speedgrade, and timing data.
+LPDDR4/5 and RPC initialization, conversion of SPD results into controller
+cycles, and the device catalog remain P9 work.
 
 ## Build and test
 

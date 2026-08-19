@@ -234,3 +234,53 @@ object DramInit {
     DramInitResult(steps, Map(1 -> BigInt(mr1)))
   }
 }
+
+/** Deterministic firmware/source representations of a generated init table. */
+object DramInitExport {
+  private def identifier(value: String): String = {
+    val sanitized = value.map(character =>
+      if (character.isLetterOrDigit || character == '_') character else '_')
+    val nonEmpty = if (sanitized.nonEmpty) sanitized else "dram"
+    if (nonEmpty.head.isDigit) s"dram_$nonEmpty" else nonEmpty
+  }
+
+  def toC(result: DramInitResult, name: String = "dram_init"): String = {
+    val symbol = identifier(name)
+    val rows = result.steps.map { value =>
+      f"  { ${value.address}%#x, ${value.bank}%d, ${value.command}%#x, ${value.delayCycles}%d }, /* ${value.description} */"
+    }.mkString("\n")
+    val modeRegisters = result.modeRegisters.toSeq.sortBy(_._1).map { case (index, value) =>
+      f"#define ${symbol.toUpperCase}_MR$index ${value}%#x"
+    }.mkString("\n")
+    val prefix = if (modeRegisters.isEmpty) "" else modeRegisters + "\n\n"
+    s"""${prefix}typedef struct {
+       |  unsigned int address;
+       |  unsigned int bank;
+       |  unsigned int command;
+       |  unsigned int delay_cycles;
+       |} dram_init_step_t;
+       |
+       |static const dram_init_step_t ${symbol}[] = {
+       |$rows
+       |};
+       |static const unsigned int ${symbol}_count = ${result.steps.size};
+       |""".stripMargin
+  }
+
+  def toScala(result: DramInitResult, name: String = "DramInitTable"): String = {
+    val symbol = identifier(name)
+    val rows = result.steps.map { value =>
+      val escaped = value.description.replace("\\", "\\\\").replace("\"", "\\\"")
+      s"    DramInitStep(\"$escaped\", BigInt(\"${value.address}\"), ${value.bank}, ${value.command}, ${value.delayCycles})"
+    }.mkString(",\n")
+    val modeRegisters = result.modeRegisters.toSeq.sortBy(_._1)
+      .map { case (index, value) => s"$index -> BigInt(\"$value\")" }.mkString(", ")
+    s"""object $symbol {
+       |  val result: DramInitResult = DramInitResult(
+       |    steps = Seq(
+       |$rows),
+       |    modeRegisters = Map($modeRegisters))
+       |}
+       |""".stripMargin
+  }
+}
