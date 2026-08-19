@@ -42,9 +42,9 @@ The Chisel core maps these responsibilities as follows:
 | Compatibility simulation model | `DramController` |
 | DFI command encoding | `DfiSteerer` |
 
-This is not yet a drop-in replacement for LiteDRAM. In particular,
-PHY-latency-aligned DFI data, init/SPD, functional frontends, ECC, and PHY
-families remain tracked work in the development plan.
+This is not yet a drop-in replacement for LiteDRAM. In particular, the full
+init/SPD catalog, ECC-integrated Native wrappers, and PHY families remain
+tracked work in the development plan.
 
 The frontend layer currently includes Native up/down width conversion, a
 Gray-pointer asynchronous Native CDC, Wishbone B4 with width conversion,
@@ -66,8 +66,12 @@ counters, and a fixed-window bandwidth monitor. Their remaining control-plane,
 bypass, and read-modify-write variants are tracked in P8.
 
 The DFI layer exposes the standard DDR4 `act_n` signal and includes a DDR4
-command mux plus a hardware/external/software injector with per-phase read-data
-capture. Rate conversion and the initialization/SPD stack remain P9 work.
+command mux, a hardware/external/software injector with per-phase read-data
+capture, a related-clock rate converter, and a phase-granular timing checker.
+The pure Scala initialization generator currently matches the repository's
+SDR, DDR3, and DDR4 golden tables and also covers DDR, LPDDR, and DDR2. C/Scala
+text export, LPDDR4/5 and RPC initialization, SPD parsing, and the device
+catalog remain P9 work.
 
 ## Build and test
 

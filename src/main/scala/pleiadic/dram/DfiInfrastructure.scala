@@ -93,3 +93,88 @@ class DfiInjector(config: DramConfig) extends Module {
   }
   io.capturedRead := captured
 }
+
+/**
+  * Related-clock DFI rate converter. The slow-side DFI has `ratio` times as
+  * many phases and 1/ratio of the per-phase data width. Slow-side signals must
+  * remain stable for the complete group of fast-clock slots.
+  */
+class DfiRateConverter(fastConfig: DramConfig, ratio: Int,
+    writeDelay: Int = 0, readDelay: Int = 0) extends RawModule {
+  require(ratio >= 2 && (ratio & (ratio - 1)) == 0)
+  require(writeDelay >= 0 && writeDelay < ratio)
+  require(readDelay >= 0 && readDelay < ratio)
+  require(fastConfig.dfiDataBits % ratio == 0)
+  val slowConfig: DramConfig = fastConfig.copy(nPhases = fastConfig.nPhases * ratio)
+  require(slowConfig.dfiDataBits * ratio == fastConfig.dfiDataBits)
+
+  val io = IO(new Bundle {
+    val fastClock = Input(Clock())
+    val fastReset = Input(AsyncReset())
+    val slow = Input(new DfiInterface(slowConfig))
+    val fast = Output(new DfiInterface(fastConfig))
+    val fastRead = Input(Vec(fastConfig.nPhases, new DfiReadResponse(fastConfig)))
+    val slowRead = Output(Vec(slowConfig.nPhases, new DfiReadResponse(slowConfig)))
+    val slot = Output(UInt(log2Ceil(ratio).W))
+  })
+
+  private val slot = withClockAndReset(io.fastClock, io.fastReset) {
+    val value = RegInit(0.U(log2Ceil(ratio).W))
+    value := Mux(value === (ratio - 1).U, 0.U, value + 1.U)
+    value
+  }
+  io.slot := slot
+  io.fast := 0.U.asTypeOf(new DfiInterface(fastConfig))
+
+  for (fastPhaseIndex <- 0 until fastConfig.nPhases) {
+    val selectedIndex = (slot * fastConfig.nPhases.U + fastPhaseIndex.U)(
+      log2Ceil(slowConfig.nPhases) - 1, 0)
+    val source = io.slow.phases(selectedIndex)
+    val destination = io.fast.phases(fastPhaseIndex)
+    destination.address := source.address
+    destination.bank := source.bank
+    destination.csN := source.csN
+    destination.rasN := source.rasN
+    destination.casN := source.casN
+    destination.weN := source.weN
+    destination.actN := source.actN
+    destination.cke := source.cke
+    destination.odt := source.odt
+    destination.resetN := source.resetN
+    destination.rddataEn := source.rddataEn
+    destination.wrdataEn := source.wrdataEn
+    destination.rddata := io.fastRead(fastPhaseIndex).data
+    destination.rddataValid := io.fastRead(fastPhaseIndex).valid
+
+    val writeDataLanes = Wire(Vec(ratio, UInt(slowConfig.dfiDataBits.W)))
+    val writeMaskLanes = Wire(Vec(ratio, UInt((slowConfig.dfiDataBits / 8).W)))
+    for (lane <- 0 until ratio) {
+      writeDataLanes(lane) := io.slow.phases(fastPhaseIndex * ratio + lane).wrdata
+      writeMaskLanes(lane) := io.slow.phases(fastPhaseIndex * ratio + lane).wrdataMask
+    }
+    destination.wrdata := Mux(slot === writeDelay.U, writeDataLanes.asUInt, 0.U)
+    destination.wrdataMask := Mux(slot === writeDelay.U, writeMaskLanes.asUInt, 0.U)
+  }
+
+  private val capturedRead = withClockAndReset(io.fastClock, io.fastReset) {
+    RegInit(VecInit(Seq.fill(fastConfig.nPhases)(0.U(fastConfig.dfiDataBits.W))))
+  }
+  private val capturedValid = withClockAndReset(io.fastClock, io.fastReset) {
+    RegInit(VecInit(Seq.fill(fastConfig.nPhases)(false.B)))
+  }
+  withClockAndReset(io.fastClock, io.fastReset) {
+    when(slot === readDelay.U) {
+      for (phase <- 0 until fastConfig.nPhases) {
+        capturedRead(phase) := io.fastRead(phase).data
+        capturedValid(phase) := io.fastRead(phase).valid
+      }
+    }
+  }
+  for (fastPhase <- 0 until fastConfig.nPhases; lane <- 0 until ratio) {
+    val slowPhase = fastPhase * ratio + lane
+    val low = lane * slowConfig.dfiDataBits
+    val high = low + slowConfig.dfiDataBits - 1
+    io.slowRead(slowPhase).data := capturedRead(fastPhase)(high, low)
+    io.slowRead(slowPhase).valid := capturedValid(fastPhase)
+  }
+}

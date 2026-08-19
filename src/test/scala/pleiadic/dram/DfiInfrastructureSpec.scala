@@ -2,8 +2,31 @@ package pleiadic.dram
 
 import chisel3._
 import chiseltest._
+import chiseltest.simulator.{VerilatorBackendAnnotation, VerilatorCFlags}
 import org.scalatest.flatspec.AnyFlatSpec
 import scala.language.reflectiveCalls
+
+class DfiRateConverterHarness extends Module {
+  private val fastConfig = DramConfig(addressBits = 20, dataBits = 64, bankBits = 1,
+    rowBits = 10, columnBits = 6, nPhases = 2, timing = DramTiming(tRefi = 100))
+  private val converter = Module(new DfiRateConverter(fastConfig, ratio = 2,
+    writeDelay = 1, readDelay = 0))
+  val io = IO(new Bundle {
+    val slow = Input(new DfiInterface(converter.slowConfig))
+    val fast = Output(new DfiInterface(fastConfig))
+    val fastRead = Input(Vec(fastConfig.nPhases, new DfiReadResponse(fastConfig)))
+    val slowRead = Output(Vec(converter.slowConfig.nPhases,
+      new DfiReadResponse(converter.slowConfig)))
+    val slot = Output(UInt(1.W))
+  })
+  converter.io.fastClock := clock
+  converter.io.fastReset := reset.asAsyncReset
+  converter.io.slow := io.slow
+  converter.io.fastRead := io.fastRead
+  io.fast := converter.io.fast
+  io.slowRead := converter.io.slowRead
+  io.slot := converter.io.slot
+}
 
 class DfiInfrastructureSpec extends AnyFlatSpec with ChiselScalatestTester {
   private val cfg = DramConfig(addressBits = 24, dataBits = 32, bankBits = 1,
@@ -111,6 +134,50 @@ class DfiInfrastructureSpec extends AnyFlatSpec with ChiselScalatestTester {
       dut.clock.step()
       dut.io.phyRead(0).valid.poke(false.B)
       dut.io.capturedRead(0).expect("h5678".U)
+    }
+  }
+
+  behavior of "DfiRateConverter"
+
+  it should "serialize command phases and align packed write/read data windows" in {
+    test(new DfiRateConverterHarness).withAnnotations(Seq(
+      VerilatorBackendAnnotation, VerilatorCFlags(Seq("-DWData=IData")))) { dut =>
+      dut.io.slow.phases.foreach(clearPhase)
+      for (phase <- 0 until 4) {
+        dut.io.slow.phases(phase).address.poke((10 + phase).U)
+        dut.io.slow.phases(phase).bank.poke((phase & 1).U)
+        dut.io.slow.phases(phase).wrdata.poke((0x1000 + phase).U)
+        dut.io.slow.phases(phase).wrdataMask.poke((phase & 3).U)
+      }
+      dut.io.fastRead(0).data.poke("haabbccdd".U)
+      dut.io.fastRead(0).valid.poke(true.B)
+      dut.io.fastRead(1).data.poke("h11223344".U)
+      dut.io.fastRead(1).valid.poke(true.B)
+
+      while (dut.io.slot.peek().litValue != 0) dut.clock.step()
+      dut.io.fast.phases(0).address.expect(10.U)
+      dut.io.fast.phases(1).address.expect(11.U)
+      dut.io.fast.phases(0).wrdata.expect(0.U)
+      dut.clock.step()
+
+      dut.io.slot.expect(1.U)
+      dut.io.fast.phases(0).address.expect(12.U)
+      dut.io.fast.phases(1).address.expect(13.U)
+      dut.io.fast.phases(0).wrdata.expect("h10011000".U)
+      dut.io.fast.phases(1).wrdata.expect("h10031002".U)
+      dut.io.fast.phases(0).wrdataMask.expect("h4".U)
+      dut.io.fast.phases(1).wrdataMask.expect("he".U)
+      dut.io.slowRead(0).data.expect("hccdd".U)
+      dut.io.slowRead(1).data.expect("haabb".U)
+      dut.io.slowRead(2).data.expect("h3344".U)
+      dut.io.slowRead(3).data.expect("h1122".U)
+      dut.io.slowRead.foreach(_.valid.expect(true.B))
+
+      dut.io.fastRead.foreach(_.valid.poke(false.B))
+      dut.clock.step()
+      dut.io.slot.expect(0.U)
+      dut.clock.step()
+      dut.io.slowRead.foreach(_.valid.expect(false.B))
     }
   }
 }
