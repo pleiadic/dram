@@ -42,14 +42,17 @@ The Chisel core maps these responsibilities as follows:
 | Compatibility simulation model | `DramController` |
 | DFI command encoding | `DfiSteerer` |
 
-This is not yet a drop-in replacement for LiteDRAM. In particular, native
-width conversion/CDC, bus frontends, PHY-latency-aligned DFI data, init/SPD,
-and PHY families remain tracked work in the development plan.
+This is not yet a drop-in replacement for LiteDRAM. In particular,
+PHY-latency-aligned DFI data, init/SPD, functional frontends, ECC, and PHY
+families remain tracked work in the development plan.
 
-The frontend layer currently includes functional Native up/down width
-conversion, a Gray-pointer asynchronous Native CDC, and an equal-width
-Wishbone classic bridge. Avalon-MM, AXI4, and burst-specific optimizations are
-the next development stage.
+The frontend layer currently includes Native up/down width conversion, a
+Gray-pointer asynchronous Native CDC, Wishbone B4 with width conversion,
+burst-capable Avalon-MM, and an AXI4 bridge. The AXI bridge buffers AW/W/AR
+independently, preserves IDs, implements FIXED/INCR/WRAP address generation,
+and never releases write data before a matching Native command. Optional AXI
+sidebands/exclusive accesses, ECC read-modify-write, and narrow-Wishbone burst
+coalescing remain compatibility work.
 
 The asynchronous FIFO regression uses Verilator and derived clocks with
 different periods. ChiselTest 6 requires a local `WData` compatibility define
