@@ -44,7 +44,17 @@ case class DramInitSettings(
   rttWr: Option[String] = None,
   ron: Option[String] = None,
   tdqs: Int = 0,
-  fineRefreshMode: String = "1x") {
+  fineRefreshMode: String = "1x",
+  dqOdt: String = "RZQ/2",
+  caOdt: String = "RZQ/2",
+  pullDownDriveStrength: String = "RZQ/2",
+  vrefCaRange: Int = 1,
+  vrefCaPercent: Double = 30.4,
+  vrefDqRange: Int = 1,
+  vrefDqPercent: Double = 30.4,
+  wckCkRatio: Int = 2,
+  socOdt: String = "disable",
+  wckOdt: String = "disable") {
   require(casLatency > 0 && writeLatency >= 0 && nPhases > 0)
   require(tdqs == 0 || tdqs == 1)
 }
@@ -80,6 +90,8 @@ object DramInit {
       case "DDR3" => ddr3(settings, timing)
       case "RPC" => rpc(settings)
       case "DDR4" => ddr4(settings, timing)
+      case "LPDDR4" => lpddr4(settings)
+      case "LPDDR5" => lpddr5(settings)
       case other => throw new IllegalArgumentException(
         s"initialization sequence for $other is not implemented")
     }
@@ -270,6 +282,131 @@ object DramInit {
       } ++ Seq(step("ZQ Calibration", 0x400,
         command = zqCalibration, delay = 200))
     DramInitResult(steps, Map(1 -> BigInt(mr1)))
+  }
+
+  private val lpddrRzq = Map("disable" -> 0, "RZQ/1" -> 1,
+    "RZQ/2" -> 2, "RZQ/3" -> 3, "RZQ/4" -> 4, "RZQ/5" -> 5,
+    "RZQ/6" -> 6)
+  private val lpddr4Latency = Map(
+    6 -> (4, 6), 10 -> (6, 10), 14 -> (8, 16), 20 -> (10, 20),
+    24 -> (12, 24), 28 -> (14, 30), 32 -> (16, 34), 36 -> (18, 40))
+  private val lpddr4ReadLatency = Map(6 -> 0, 10 -> 1, 14 -> 2, 20 -> 3,
+    24 -> 4, 28 -> 5, 32 -> 6, 36 -> 7)
+  private val lpddr4WriteLatency = Map(4 -> 0, 6 -> 1, 8 -> 2, 10 -> 3,
+    12 -> 4, 14 -> 5, 16 -> 6, 18 -> 7)
+  private val lpddr4Nwr = Map(6 -> 0, 10 -> 1, 16 -> 2, 20 -> 3,
+    24 -> 4, 30 -> 5, 34 -> 6, 40 -> 7)
+
+  private def lpddr4Vref(range: Int, percent: Double): Int = {
+    val minimum = range match {
+      case 0 => 10.0
+      case 1 => 22.0
+      case _ => throw new IllegalArgumentException(s"unsupported LPDDR4 VREF range: $range")
+    }
+    val code = math.round((percent - minimum) / 0.4).toInt
+    require(code >= 0 && code <= 50 &&
+      math.abs(minimum + code * 0.4 - percent) < 1e-6,
+      f"unsupported LPDDR4 VREF value: $percent%.3f%% in range $range")
+    code
+  }
+
+  private def lpddr4(settings: DramInitSettings): DramInitResult = {
+    val cl = settings.casLatency
+    val cwl = settings.writeLatency
+    val expected = lpddr4Latency.getOrElse(cl,
+      throw new IllegalArgumentException(s"unsupported LPDDR4 read latency: $cl"))
+    require(cwl == expected._1,
+      s"LPDDR4 RL=$cl requires WL=${expected._1}, got $cwl")
+    val nwr = expected._2
+    val mr1 = (1 << 2) | (lookup("LPDDR4 nWR", nwr, lpddr4Nwr) << 4)
+    val mr2 = lookup("LPDDR4 RL", cl, lpddr4ReadLatency) |
+      (lookup("LPDDR4 WL", cwl, lpddr4WriteLatency) << 3)
+    val mr3 = 1 | (lookup("LPDDR4 pull-down drive strength",
+      settings.pullDownDriveStrength, lpddrRzq) << 3)
+    val mr11 = lookup("LPDDR4 DQ ODT", settings.dqOdt, lpddrRzq) |
+      (lookup("LPDDR4 CA ODT", settings.caOdt, lpddrRzq) << 4)
+    val mr12 = lpddr4Vref(settings.vrefCaRange, settings.vrefCaPercent) |
+      (settings.vrefCaRange << 6)
+    val mr14 = lpddr4Vref(settings.vrefDqRange, settings.vrefDqPercent) |
+      (settings.vrefDqRange << 6)
+    val modeRegisters = Map(1 -> mr1, 2 -> mr2, 3 -> mr3, 11 -> mr11,
+      12 -> mr12, 13 -> 0, 14 -> mr14)
+    def delay(seconds: Double): Int = math.ceil(seconds * 200e6).toInt
+    val modeSteps = modeRegisters.toSeq.sortBy(_._1).map { case (address, opcode) =>
+      step(s"Load More Register $address", opcode, address,
+        modeRegister, delay = 200)
+    }
+    val steps = Seq(
+      step("Assert reset", command = controlOdt, delay = delay(100e-9)),
+      step("Release reset", command = unreset, delay = delay(2e-3)),
+      step("Bring CKE high", command = clockEnable, delay = delay(2e-6))) ++
+      modeSteps ++ Seq(
+        step("ZQ Calibration start", 0x4f, command = zqCalibration,
+          delay = delay(1e-6)),
+        step("ZQ Calibration latch", 0x51, command = zqCalibration,
+          delay = math.max(8, delay(30e-9))))
+    DramInitResult(steps, modeRegisters.view.mapValues(BigInt(_)).toMap)
+  }
+
+  private val lpddr5Latency = Map(
+    2 -> Map((6, 4) -> 0, (8, 4) -> 1, (10, 6) -> 2,
+      (12, 8) -> 3, (16, 8) -> 4, (18, 10) -> 5),
+    4 -> Map((3, 2) -> 0, (4, 2) -> 1, (5, 3) -> 2,
+      (6, 4) -> 3, (8, 4) -> 4, (9, 5) -> 5, (10, 6) -> 6,
+      (12, 6) -> 7, (13, 7) -> 8, (15, 8) -> 9, (16, 9) -> 10,
+      (17, 9) -> 11))
+
+  private def lpddr5Vref(percent: Double): Int = {
+    require(percent >= 15.0 && percent <= 73.5,
+      f"LPDDR5 VREF must be between 15.0%% and 73.5%%, got $percent%.3f%%")
+    // Python round() and math.rint both use round-to-nearest-even.
+    val rounded = math.rint(percent * 2.0) / 2.0
+    val code = ((rounded - 10.0) * 2.0).toInt
+    require(code >= 0 && code <= 0x7f)
+    code
+  }
+
+  private def lpddr5(settings: DramInitSettings): DramInitResult = {
+    val ratioMap = lpddr5Latency.getOrElse(settings.wckCkRatio,
+      throw new IllegalArgumentException(
+        s"unsupported LPDDR5 WCK:CK ratio: ${settings.wckCkRatio}"))
+    val range = ratioMap.getOrElse((settings.casLatency, settings.writeLatency),
+      throw new IllegalArgumentException(
+        s"unsupported LPDDR5 RL/WL pair ${settings.casLatency}/${settings.writeLatency} " +
+          s"for WCK:CK=${settings.wckCkRatio}"))
+    val vrefCa = lpddr5Vref(settings.vrefCaPercent)
+    val vrefDq = lpddr5Vref(settings.vrefDqPercent)
+    val modeRegisters = Map(
+      1 -> (range << 4),
+      2 -> (range | (range << 4)),
+      3 -> (lookup("LPDDR5 pull-down drive strength",
+        settings.pullDownDriveStrength, lpddrRzq) | (2 << 3)),
+      10 -> 0,
+      11 -> (lookup("LPDDR5 DQ ODT", settings.dqOdt, lpddrRzq) |
+        (lookup("LPDDR5 CA ODT", settings.caOdt, lpddrRzq) << 4)),
+      12 -> vrefCa,
+      13 -> 0,
+      14 -> vrefDq,
+      15 -> vrefDq,
+      17 -> (lookup("LPDDR5 SoC ODT", settings.socOdt, lpddrRzq) | 0x38),
+      18 -> (lookup("LPDDR5 WCK ODT", settings.wckOdt, lpddrRzq) |
+        (if (settings.wckCkRatio == 2) 0x80 else 0)),
+      20 -> 1,
+      22 -> 0,
+      28 -> 4)
+    def delay(seconds: Double): Int = math.ceil(seconds * 200e6).toInt
+    val modeSteps = modeRegisters.toSeq.sortBy(_._1).map { case (address, opcode) =>
+      step(s"Load More Register $address", opcode, address,
+        modeRegister, delay = 200)
+    }
+    val steps = Seq(
+      step("Assert reset", command = controlOdt, delay = delay(200e-6)),
+      step("Release reset", command = unreset, delay = delay(2e-3) + 5),
+      step("Toggle CS", bank = 2, command = zqCalibration, delay = delay(2e-6))) ++
+      modeSteps ++ Seq(
+        step("ZQ Calibration latch", 0x86, command = zqCalibration,
+          delay = math.max(4, delay(30e-9))))
+    DramInitResult(steps, modeRegisters.view.mapValues(BigInt(_)).toMap)
   }
 }
 

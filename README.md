@@ -75,7 +75,10 @@ CSV or LiteX BIOS hexdumps and extracts geometry, speedgrade, and timing data.
 It also converts mixed CK/ns constraints into controller cycles using the same
 rate margin and refresh exception as LiteDRAM. RPC mode-register encoding and
 its reset/special-command/ZQ initialization sequence are covered. LPDDR4/5
-initialization and the static device catalog remain P9 work.
+initialization includes latency/frequency-set selection, ODT/drive strength,
+VREF, complete mode-register tables, and reset/ZQ sequencing. Initialization
+now covers every memory type handled by LiteDRAM `init.py`; the static device
+catalog remains P9 work.
 
 ## Build and test
 
