@@ -61,4 +61,25 @@ class DramSpdSpec extends AnyFlatSpec with Matchers {
     an[IllegalArgumentException] should be thrownBy DramSpd.parse(Seq(0, 0, 0xff))
     an[IllegalArgumentException] should be thrownBy DramSpd.parseMicronCsv(Seq("header"))
   }
+
+  it should "match LiteDRAM controller-cycle conversion for DDR3 and DDR4" in {
+    val ddr3 = DramSpd.parseMicronCsv(reference("MT16KTF1G64HZ-1G6P1.csv"))
+    DramSpd.toDramTiming(ddr3, controllerClockHz = 125e6, nPhases = 4) shouldBe
+      DramTiming(tRcd = 3, tRp = 3, tRas = 6, tRc = 7, tCcd = 1,
+        tWr = 3, tWtr = 2, tRtp = 1, tRrd = 2, tFaw = 5,
+        tRefi = 977, tRfc = 34, tZqcs = Some(16))
+
+    val ddr4Lines = reference("MTA4ATF51264HZ-2G3B1.csv")
+    val ddr4 = DramSpd.parseMicronCsv(ddr4Lines)
+    DramSpd.toDramTiming(ddr4, controllerClockHz = 100e6, nPhases = 4) shouldBe
+      DramTiming(tRcd = 3, tRp = 3, tRas = 4, tRc = 6, tCcd = 2,
+        tWr = 3, tWtr = 2, tRtp = 1, tRrd = 2, tFaw = 7,
+        tRefi = 782, tRfc = 36, tZqcs = Some(32))
+
+    val ddr4Refresh2x = DramSpd.parseMicronCsv(ddr4Lines, fineRefreshMode = "2x")
+    val refresh2x = DramSpd.toDramTiming(ddr4Refresh2x,
+      controllerClockHz = 100e6, nPhases = 4)
+    refresh2x.tRefi shouldBe 391
+    refresh2x.tRfc shouldBe 27
+  }
 }

@@ -51,6 +51,48 @@ object DramSpd {
     }
   }
 
+  /**
+    * Convert SPD CK/ns limits to controller-clock cycles with LiteDRAM's
+    * safety margin for a 1:nPhases controller/DRAM clock ratio.
+    */
+  def toDramTiming(data: DramSpdData, controllerClockHz: Double, nPhases: Int,
+      readToPrecharge: SpdTiming = SpdTiming(cycles = 4)): DramTiming = {
+    require(controllerClockHz > 0, "controller clock frequency must be positive")
+    require(nPhases > 0, "DFI phase count must be positive")
+    val controllerPeriodNs = 1e9 / controllerClockHz
+    val marginNs = controllerPeriodNs * (1.0 - 1.0 / nPhases)
+
+    def convert(timing: SpdTiming, margin: Boolean = true): Int = {
+      val ckCycles = math.ceil(timing.cycles.toDouble / nPhases).toInt
+      val ns = timing.nanoseconds + (if (margin) marginNs else 0.0)
+      val nsCycles = math.ceil(ns / controllerPeriodNs).toInt
+      math.max(ckCycles, nsCycles)
+    }
+    def technology(name: String): SpdTiming = data.technologyTimings.getOrElse(name,
+      throw new IllegalArgumentException(s"SPD data is missing technology timing $name"))
+    def speed(name: String): SpdTiming = data.speedgradeTimings.getOrElse(name,
+      throw new IllegalArgumentException(s"SPD data is missing speedgrade timing $name"))
+    def sum(left: SpdTiming, right: SpdTiming): SpdTiming =
+      SpdTiming(left.cycles + right.cycles, left.nanoseconds + right.nanoseconds)
+
+    val rp = speed("tRP")
+    val ras = speed("tRAS")
+    DramTiming(
+      tRcd = convert(speed("tRCD")),
+      tRp = convert(rp),
+      tRas = convert(ras),
+      tRc = convert(sum(rp, ras)),
+      tCcd = convert(technology("tCCD")),
+      tWr = convert(speed("tWR")),
+      tWtr = convert(technology("tWTR")),
+      tRtp = convert(readToPrecharge),
+      tRrd = convert(technology("tRRD")),
+      tFaw = convert(speed("tFAW")),
+      tRefi = convert(technology("tREFI"), margin = false),
+      tRfc = convert(speed("tRFC")),
+      tZqcs = data.technologyTimings.get("tZQCS").map(convert(_)))
+  }
+
   /** Parse Micron's four-column SPD CSV reference format. */
   def parseMicronCsv(lines: Seq[String], fineRefreshMode: String = "1x"): DramSpdData = {
     val values = Array.fill(512)(0)
