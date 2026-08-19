@@ -77,8 +77,10 @@ rate margin and refresh exception as LiteDRAM. RPC mode-register encoding and
 its reset/special-command/ZQ initialization sequence are covered. LPDDR4/5
 initialization includes latency/frequency-set selection, ODT/drive strength,
 VREF, complete mode-register tables, and reset/ZQ sequencing. Initialization
-now covers every memory type handled by LiteDRAM `init.py`; the static device
-catalog remains P9 work.
+now covers every memory type handled by LiteDRAM `init.py`. The generated
+device catalog contains all 74 concrete modules from the pinned `modules.py`,
+including geometry, registered-module flags, speedgrades, and fine-refresh
+timing variants, and can convert a selected entry directly to `DramTiming`.
 
 ## Build and test
 

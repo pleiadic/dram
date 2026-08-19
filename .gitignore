@@ -3,3 +3,5 @@ target/
 .metals/
 .scala-build/
 test_run_dir/
+__pycache__/
+*.pyc
