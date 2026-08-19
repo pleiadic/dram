@@ -59,6 +59,12 @@ different periods. ChiselTest 6 requires a local `WData` compatibility define
 when used with Verilator 5.050 or newer; the define is scoped to the test C++
 harness and does not alter generated RTL.
 
+Functional frontends now also include ordered Native DMA reader/writer engines,
+an equal-width DRAM-backed ring FIFO, incremental/PRBS BIST generation and
+checking, LiteX-compatible per-lane SEC-DED codecs, saturating ECC status
+counters, and a fixed-window bandwidth monitor. Their remaining control-plane,
+bypass, and read-modify-write variants are tracked in P8.
+
 ## Build and test
 
 Requirements: JDK 11+ and sbt 2.0.6 (the project launcher version).
