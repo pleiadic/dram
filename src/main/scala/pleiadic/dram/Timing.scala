@@ -104,7 +104,9 @@ class BitSlip(width: Int, cycles: Int = 1) extends Module {
   }
   when(io.resetSlip) { position := (positions - 1).U }
 
-  io.out := (history >> (position + 1.U))(width - 1, 0)
+  // The extra carry bit is required at the reset position: for a 16-bit
+  // bitslip, 15 + 1 must select history[31:16], not wrap to a 4-bit zero.
+  io.out := (history >> (position +& 1.U))(width - 1, 0)
 }
 
 /** DDR DQS pattern generator. Patterns are transmitted LSB first. */

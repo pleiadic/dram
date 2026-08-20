@@ -62,6 +62,26 @@ class TimingSpec extends AnyFlatSpec with ChiselScalatestTester {
     }
   }
 
+  it should "select the full-width reset tap and wrap programmable slips" in {
+    test(new BitSlip(width = 4)) { dut =>
+      dut.io.in.poke("b0011".U)
+      dut.io.resetSlip.poke(false.B)
+      dut.io.slip.poke(false.B)
+      dut.clock.step()
+      dut.io.out.expect("b0011".U)
+
+      // Position 3 wraps to 0. With two identical history words, selecting
+      // bits [4:1] produces 1001.
+      dut.io.slip.poke(true.B)
+      dut.clock.step()
+      dut.io.out.expect("b1001".U)
+      dut.io.slip.poke(false.B)
+      dut.io.resetSlip.poke(true.B)
+      dut.clock.step()
+      dut.io.out.expect("b0011".U)
+    }
+  }
+
   it should "generate all DQS patterns with write leveling priority" in {
     test(new DqsPattern) { dut =>
       dut.io.preamble.poke(false.B)

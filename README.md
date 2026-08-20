@@ -107,6 +107,12 @@ LiteDRAM overlap-filter modes. The LPDDR5 scheduler buffers the second small
 command, delays one-part commands consistently, and reports an illegal adjacent
 command that collides with the buffer.
 
+The portable LPDDR4 PHY presents complete 16-edge parallel vectors for an
+outer I/O serializer wrapper. It includes 8-phase DFI command integration,
+bidirectional DQ transposition, DMI masks, DQS preamble/postamble and write
+leveling, latency control, delayed CKE/ODT/reset, and independently selectable
+read/write bitslip per byte lane.
+
 ## Build and test
 
 Requirements: JDK 11+ and sbt 2.0.6 (the project launcher version).
