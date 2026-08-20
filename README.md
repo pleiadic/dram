@@ -113,6 +113,12 @@ bidirectional DQ transposition, DMI masks, DQS preamble/postamble and write
 leveling, latency control, delayed CKE/ODT/reset, and independently selectable
 read/write bitslip per byte lane.
 
+The portable LPDDR5 PHY supports WCK:CK ratios of 2:1 and 4:1. Its WCK state
+machine implements synchronization delay, static preamble, half/full-rate
+toggle, postamble, and leveling patterns. A BL16 DFI word is split into two or
+four serialized chunks on writes and reassembled on reads, with DMI, output
+enable, per-byte bitslip, and the buffered CA command path kept aligned.
+
 ## Build and test
 
 Requirements: JDK 11+ and sbt 2.0.6 (the project launcher version).
