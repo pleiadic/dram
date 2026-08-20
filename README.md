@@ -95,6 +95,12 @@ byte masks, delays reads/writes, and reports invalid command sequencing. Large
 production geometries should be reduced when instantiating its explicit test
 memory.
 
+Portable command adapters translate legacy DFI encodings into LPDDR4 and
+LPDDR5 CA edge sequences or RPC parallel Request Packets. They cover mode
+register and special commands, masked writes, LPDDR5 WCK synchronization, and
+RPC reset/utility/ZQ encodings; directed vectors are golden outputs from the
+pinned LiteDRAM Migen implementation.
+
 ## Build and test
 
 Requirements: JDK 11+ and sbt 2.0.6 (the project launcher version).
