@@ -64,12 +64,15 @@ case class DramConfig(
   readTime: Int = 32,
   writeTime: Int = 16,
   readLatency: Int = 1,
-  writeLatency: Int = 0
+  writeLatency: Int = 0,
+  // Physical DQ pad width. Zero preserves the historical behavior where it
+  // follows the per-phase DFI width.
+  padDataBits: Int = 0
 ) {
   val byteOffsetBits: Int = log2Ceil(dataBits / 8)
   require(addressBits > 0 && dataBits > 0 && dataBits % 8 == 0)
   require(bankBits > 0 && rowBits > 0 && columnBits > 0)
-  require(nPhases > 0 && nranks > 0 && phyDataBits >= 0)
+  require(nPhases > 0 && nranks > 0 && phyDataBits >= 0 && padDataBits >= 0)
   require((nranks & (nranks - 1)) == 0, "nranks must be a power of two")
   val rankAddressBits: Int = log2Ceil(nranks)
   require(byteOffsetBits + bankBits + rowBits + columnBits + rankAddressBits <= addressBits)
@@ -86,6 +89,8 @@ case class DramConfig(
   val dfiDataBits: Int = effectivePhyDataBits / nPhases
   require(effectivePhyDataBits % nPhases == 0 && dfiDataBits % 8 == 0)
   require(dataBits >= dfiDataBits)
+  val effectivePadDataBits: Int = if (padDataBits == 0) dfiDataBits else padDataBits
+  require(effectivePadDataBits > 0 && effectivePadDataBits % 8 == 0)
 }
 
 class DramRequest(config: DramConfig) extends Bundle {

@@ -85,7 +85,9 @@ timing variants, and can convert a selected entry directly to `DramTiming`.
 PHY work has started with a portable full-rate Generic SDR implementation. It
 forwards the single DFI phase to pad-side command/address signals, gates DQ/DM
 on write enable, and aligns read-valid to `CL + 1`; FPGA-specific I/O cells are
-left to thin outer wrappers.
+left to thin outer wrappers. The half-rate variant serializes two DFI phases
+over a related 2x clock and captures both read samples. Physical pad width is
+now independent from Native and aggregate/per-phase DFI widths.
 
 ## Build and test
 
