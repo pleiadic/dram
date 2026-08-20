@@ -17,17 +17,19 @@ object DfiTimingRule {
   val tRrd = 9.U(5.W)
   val tFaw = 10.U(5.W)
   val tRefi = 11.U(5.W)
+  val tZqcs = 12.U(5.W)
 }
 
 /** Synthesizable DFI command timing monitor using phase-granular timestamps. */
 class DfiTimingChecker(config: DramConfig) extends Module {
   private val bankCount = config.rankBankCount
-  private val commandCount = 5
+  private val commandCount = 6
   private val pre = 0
   private val refresh = 1
   private val activate = 2
   private val read = 3
   private val write = 4
+  private val zqCalibration = 5
 
   val io = IO(new Bundle {
     val enable = Input(Bool())
@@ -49,7 +51,7 @@ class DfiTimingChecker(config: DramConfig) extends Module {
   private val rule = WireDefault(DfiTimingRule.none)
 
   private case class Rule(previous: Int, current: Int, delay: Int, code: UInt)
-  private val rules = Seq(
+  private val baseRules = Seq(
     Rule(pre, activate, config.timing.tRp, DfiTimingRule.tRp),
     Rule(pre, refresh, config.timing.tRp, DfiTimingRule.tRp),
     Rule(activate, write, config.timing.tRcd, DfiTimingRule.tRcd),
@@ -64,6 +66,8 @@ class DfiTimingChecker(config: DramConfig) extends Module {
     Rule(activate, activate, config.timing.tRc, DfiTimingRule.tRc),
     Rule(write, pre, config.timing.tWr, DfiTimingRule.tWr),
     Rule(write, read, config.timing.tWtr, DfiTimingRule.tWtr))
+  private val rules = baseRules ++ config.timing.tZqcs.toSeq.map(delay =>
+    Rule(zqCalibration, activate, delay, DfiTimingRule.tZqcs))
 
   // Newest ACT is at index 0 and the fourth-newest at index 3. Build a
   // combinational next-state chain below so multiple ACTs in different DFI
@@ -83,7 +87,8 @@ class DfiTimingChecker(config: DramConfig) extends Module {
     val isRefresh = selected && phase.actN && !phase.rasN && !phase.casN && phase.weN
     val isRead = selected && phase.actN && phase.rasN && !phase.casN && phase.weN
     val isWrite = selected && phase.actN && phase.rasN && !phase.casN && !phase.weN
-    Seq(isPrecharge, isRefresh, isActivate, isRead, isWrite)
+    val isZqCalibration = selected && phase.actN && phase.rasN && phase.casN && !phase.weN
+    Seq(isPrecharge, isRefresh, isActivate, isRead, isWrite, isZqCalibration)
   }
   private val phaseAllBanks = (0 until config.nPhases).map { phaseIndex =>
     val phase = io.dfi.phases(phaseIndex)

@@ -130,4 +130,28 @@ class DfiTimingCheckerSpec extends AnyFlatSpec with ChiselScalatestTester {
       dut.io.rule.expect(DfiTimingRule.tFaw)
     }
   }
+
+  it should "enforce tZQCS before the next activate" in {
+    val zqCfg = cfg.copy(timing = timing.copy(tZqcs = Some(3)))
+    test(new DfiTimingChecker(zqCfg)) { dut =>
+      dut.io.enable.poke(true.B)
+      dut.io.clear.poke(false.B)
+      nop(dut)
+
+      command(dut, bank = 0, rasN = true, casN = true, weN = false)
+      dut.io.violation.expect(false.B)
+      dut.clock.step()
+      nop(dut)
+      dut.clock.step()
+      command(dut, bank = 0, rasN = false, casN = true, weN = true)
+      dut.io.violation.expect(true.B)
+      dut.io.rule.expect(DfiTimingRule.tZqcs)
+
+      dut.clock.step()
+      nop(dut)
+      dut.clock.step(2)
+      command(dut, bank = 1, rasN = false, casN = true, weN = true)
+      dut.io.violation.expect(false.B)
+    }
+  }
 }

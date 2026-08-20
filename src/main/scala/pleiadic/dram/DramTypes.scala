@@ -67,7 +67,11 @@ case class DramConfig(
   writeLatency: Int = 0,
   // Physical DQ pad width. Zero preserves the historical behavior where it
   // follows the per-phase DFI width.
-  padDataBits: Int = 0
+  padDataBits: Int = 0,
+  // Optional controller-cycle period for automatic ZQ short calibration.
+  // LiteDRAM derives this from clk_freq/zqcs_freq; keeping cycles here avoids
+  // embedding a clock-frequency unit in the synthesizable configuration.
+  zqCalibrationPeriodCycles: Option[Int] = None
 ) {
   val byteOffsetBits: Int = log2Ceil(dataBits / 8)
   require(addressBits > 0 && dataBits > 0 && dataBits % 8 == 0)
@@ -80,6 +84,9 @@ case class DramConfig(
   require(refreshPostponing >= 1 && refreshPostponing <= 8)
   require(cmdBufferDepth >= 1 && readTime >= 0 && writeTime >= 0)
   require(readLatency >= 1 && writeLatency >= 0)
+  require(zqCalibrationPeriodCycles.forall(_ >= 1))
+  require(zqCalibrationPeriodCycles.isEmpty || timing.tZqcs.nonEmpty,
+    "automatic ZQ calibration requires timing.tZqcs")
   require(Set("SDR", "DDR", "LPDDR", "DDR2", "DDR3", "RPC", "DDR4", "LPDDR4", "LPDDR5").contains(memType))
   val bankCount: Int = 1 << bankBits
   val rankBankCount: Int = bankCount * nranks

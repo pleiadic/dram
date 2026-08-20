@@ -45,6 +45,7 @@ class DfiSteerer(config: DramConfig, commandPhase: Int = 0, dataPhase: Int = 0) 
       is (DramCommandType.read) { phase.casN := false.B; io.dfi.phases(dataPhase).rddataEn := true.B }
       is (DramCommandType.write) { phase.casN := false.B; phase.weN := false.B; io.dfi.phases(dataPhase).wrdataEn := true.B }
       is (DramCommandType.refresh) { phase.rasN := false.B; phase.casN := false.B }
+      is (DramCommandType.zqCalibration) { phase.weN := false.B }
     }
     when ((cmd.command === DramCommandType.read || cmd.command === DramCommandType.write) && cmd.autoPrecharge) {
       phase.address := cmd.column | (1 << 10).U

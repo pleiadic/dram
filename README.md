@@ -23,7 +23,7 @@ LiteDRAM is organized into four functional layers:
    command/data phase.
 3. **Refresh** (`core/refresher.py`) requests periodic refresh at `tREFI` and
    executes `PRECHARGE-ALL`, `tRP`, `AUTO-REFRESH`, `tRFC`, with optional
-   postponement.
+   postponement and periodic ZQ short calibration.
 4. **PHY/DFI** (`phy/`) translates abstract commands into SDR/DDR/LPDDR
    vendor-specific signals and initialization sequences.
 
@@ -34,7 +34,7 @@ The Chisel core maps these responsibilities as follows:
 | BankMachine open-row tracking | `BankMachine` per rank/bank |
 | ACT/PRE insertion and local timings | `BankMachine` |
 | Command arbitration/global timings | `CommandChooser` + `Multiplexer` |
-| RefreshTimer/Sequencer | `Refresher` + `RefreshSequencer` |
+| Refresh/ZQ timers and sequencers | `Refresher` + `RefreshSequencer` + `ZqCalibrationSequencer` |
 | Multi-master command routing | `LiteDramCommandCrossbar` |
 | Ordered native data routing | `LiteDramDataCrossbar` |
 | Controller composition | `LiteDramController` |
@@ -67,7 +67,9 @@ bypass, and read-modify-write variants are tracked in P8.
 
 The DFI layer exposes the standard DDR4 `act_n` signal and includes a DDR4
 command mux, a hardware/external/software injector with per-phase read-data
-capture, a related-clock rate converter, and a phase-granular timing checker.
+capture, a related-clock rate converter, and a phase-granular timing checker
+including tZQCS. The refresher can schedule periodic ZQ short calibration after
+a refresh while retaining exclusive ownership through both sequences.
 The pure Scala initialization generator currently matches the repository's
 SDR, DDR3, and DDR4 golden tables and also covers DDR, LPDDR, and DDR2. C/Scala
 text export is available. The DDR3/DDR4 SPD decoder accepts Micron reference

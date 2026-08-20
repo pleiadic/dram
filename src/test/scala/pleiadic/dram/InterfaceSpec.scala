@@ -42,6 +42,11 @@ class InterfaceSpec extends AnyFlatSpec with ChiselScalatestTester {
       dut.io.dfi.phases(0).weN.expect(true.B)
       dut.io.dfi.phases(0).bank.expect(2.U)
       dut.io.dfi.phases(0).address.expect(17.U)
+
+      dut.io.command.bits.command.poke(DramCommandType.zqCalibration)
+      dut.io.dfi.phases(0).rasN.expect(true.B)
+      dut.io.dfi.phases(0).casN.expect(true.B)
+      dut.io.dfi.phases(0).weN.expect(false.B)
     }
   }
 }

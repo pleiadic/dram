@@ -73,6 +73,37 @@ class RefresherSpec extends AnyFlatSpec with ChiselScalatestTester {
 
   behavior of "Refresher"
 
+  it should "precharge and wait around a ZQ short calibration" in {
+    val cfg = DramConfig(addressBits = 12, dataBits = 32, bankBits = 1, rowBits = 4,
+      columnBits = 4, timing = DramTiming(tRp = 2, tZqcs = Some(3)))
+    test(new ZqCalibrationSequencer(cfg)) { dut =>
+      dut.io.command.ready.poke(false.B)
+      dut.io.start.poke(true.B)
+      dut.clock.step()
+      dut.io.start.poke(false.B)
+      dut.io.command.valid.expect(true.B)
+      dut.io.command.bits.command.expect(DramCommandType.precharge)
+      dut.clock.step(2)
+      dut.io.command.valid.expect(true.B)
+      dut.io.command.bits.command.expect(DramCommandType.precharge)
+
+      dut.io.command.ready.poke(true.B)
+      val commands = ArrayBuffer.empty[BigInt]
+      var done = false
+      for (_ <- 0 until 16 if !done) {
+        if (dut.io.command.valid.peek().litToBoolean) {
+          commands += dut.io.command.bits.command.peek().litValue
+          dut.io.command.bits.allBanks.expect(true.B)
+        }
+        dut.clock.step()
+        done = dut.io.done.peek().litToBoolean
+      }
+      assert(done)
+      assert(commands == Seq(
+        DramCommandType.precharge.litValue, DramCommandType.zqCalibration.litValue))
+    }
+  }
+
   it should "wait for all bank machines to grant the pending refresh" in {
     val cfg = DramConfig(addressBits = 10, dataBits = 32, bankBits = 1, rowBits = 3,
       columnBits = 3, refreshPostponing = 1,
@@ -95,6 +126,34 @@ class RefresherSpec extends AnyFlatSpec with ChiselScalatestTester {
         dut.clock.step()
       }
       assert(sawPrecharge && sawRefresh)
+    }
+  }
+
+  it should "retain bank ownership through periodic refresh and pending ZQCS" in {
+    val cfg = DramConfig(addressBits = 10, dataBits = 32, bankBits = 1, rowBits = 3,
+      columnBits = 3, refreshPostponing = 1,
+      timing = DramTiming(tRp = 1, tRfc = 1, tRefi = 4, tZqcs = Some(2)),
+      zqCalibrationPeriodCycles = Some(3))
+    test(new Refresher(cfg)) { dut =>
+      dut.io.command.ready.poke(true.B)
+      dut.io.grant.poke(true.B)
+      val commands = ArrayBuffer.empty[BigInt]
+      var done = false
+      for (_ <- 0 until 32 if !done) {
+        if (dut.io.command.valid.peek().litToBoolean) {
+          commands += dut.io.command.bits.command.peek().litValue
+          dut.io.request.expect(true.B)
+          dut.io.busy.expect(true.B)
+        }
+        dut.clock.step()
+        done = dut.io.done.peek().litToBoolean
+      }
+      assert(done)
+      assert(commands == Seq(
+        DramCommandType.precharge.litValue, DramCommandType.refresh.litValue,
+        DramCommandType.precharge.litValue, DramCommandType.zqCalibration.litValue))
+      dut.io.request.expect(false.B)
+      dut.io.busy.expect(false.B)
     }
   }
 }
