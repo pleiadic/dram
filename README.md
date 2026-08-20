@@ -101,6 +101,12 @@ register and special commands, masked writes, LPDDR5 WCK synchronization, and
 RPC reset/utility/ZQ encodings; directed vectors are golden outputs from the
 pinned LiteDRAM Migen implementation.
 
+The LPDDR4 command pipeline places each four-slot CA sequence at its source DFI
+phase, carries late slots into the next controller cycle, and supports both
+LiteDRAM overlap-filter modes. The LPDDR5 scheduler buffers the second small
+command, delays one-part commands consistently, and reports an illegal adjacent
+command that collides with the buffer.
+
 ## Build and test
 
 Requirements: JDK 11+ and sbt 2.0.6 (the project launcher version).
