@@ -89,6 +89,12 @@ left to thin outer wrappers. The half-rate variant serializes two DFI phases
 over a related 2x clock and captures both read samples. Physical pad width is
 now independent from Native and aggregate/per-phase DFI widths.
 
+An independent DFI memory model decodes SDR through DDR4 command encodings,
+tracks open rows per rank/bank, combines and splits multi-phase data, applies
+byte masks, delays reads/writes, and reports invalid command sequencing. Large
+production geometries should be reduced when instantiating its explicit test
+memory.
+
 ## Build and test
 
 Requirements: JDK 11+ and sbt 2.0.6 (the project launcher version).
