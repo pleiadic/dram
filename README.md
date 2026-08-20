@@ -119,6 +119,14 @@ toggle, postamble, and leveling patterns. A BL16 DFI word is split into two or
 four serialized chunks on writes and reassembled on reads, with DMI, output
 enable, per-byte bitslip, and the buffered CA command path kept aligned.
 
+The portable RPC PHY implements the three-cycle DFI history used for Request
+Packets, the two-cycle STB preamble and optional burst-stop sequence, latched
+CS#, command/data-mask/data DB muxing, phase-specific DQS waveforms, and BL16
+write/read conversion across four 64-bit DFI phases. Its power-up controller
+enforces parallel reset, four serial-reset cycles, the reset wait, initial ZQ
+calibration, READY, and restricted Utility Register mode. Board wrappers supply
+the frequency-derived reset/ZQ cycle counts and physical serializers/tristates.
+
 ## Build and test
 
 Requirements: JDK 11+ and sbt 2.0.6 (the project launcher version).
