@@ -137,6 +137,14 @@ LPDDR5 CK/CA according to the WCK:CK ratio. LPDDR4 16-edge, LPDDR5 2:1/4:1,
 and RPC 8-edge data inputs are reassembled for their respective PHY cores.
 Analog phase shifts and vendor I/O primitives remain outer-wrapper concerns.
 
+The Xilinx 7-series primitive layer now provides parameterized 4:1 SDR and
+8:1 DDR OSERDESE2/ISERDESE2 wrappers, variable IDELAYE2/ODELAYE2 controls,
+IOBUF/IOBUFDS/OBUFDS wrappers, and a composed bidirectional SerDes lane. Inline
+SystemVerilog selects real primitives for synthesis and deterministic portable
+models otherwise. Tests compile both branches with Verilator; a Vivado device
+library smoke test remains required when the family-specific pad wrappers are
+assembled.
+
 ## Build and test
 
 Requirements: JDK 11+ and sbt 2.0.6 (the project launcher version).
