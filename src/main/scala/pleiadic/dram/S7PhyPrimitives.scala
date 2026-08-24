@@ -386,6 +386,31 @@ class S7OutputSerdesIoLane extends RawModule {
   attach(buffer.io.pad, io.pad)
 }
 
+/** Differential output/tristate lane for standard-DDR DQS pads. */
+class S7DifferentialOutputSerdesIoLane extends RawModule {
+  val io = IO(new Bundle {
+    val reset = Input(Bool())
+    val serialClock = Input(Clock())
+    val dividedClock = Input(Clock())
+    val parallelOut = Input(UInt(8.W))
+    val outputEnable = Input(Bool())
+    val padPositive = Analog(1.W)
+    val padNegative = Analog(1.W)
+  })
+
+  private val serializer = Module(new S7OutputSerdes(8, "DDR"))
+  private val buffer = Module(new S7DifferentialIoBuffer)
+  serializer.io.reset := io.reset
+  serializer.io.serialClock := io.serialClock
+  serializer.io.dividedClock := io.dividedClock
+  serializer.io.data := io.parallelOut
+  serializer.io.outputEnable := io.outputEnable
+  buffer.io.outputData := serializer.io.serial
+  buffer.io.tristate := serializer.io.tristate
+  attach(buffer.io.padPositive, io.padPositive)
+  attach(buffer.io.padNegative, io.padNegative)
+}
+
 /**
   * Controller-enable alignment used by the S7 LPDDR PHYs. When `extend` is
   * true all registered taps are ORed to retain one word of margin at each end;
