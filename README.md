@@ -129,6 +129,14 @@ enforces parallel reset, four serial-reset cycles, the reset wait, initial ZQ
 calibration, READY, and restricted Utility Register mode. Board wrappers supply
 the frequency-derived reset/ZQ cycle counts and physical serializers/tristates.
 
+A common simulation SerDes boundary converts these portable parallel PHY
+signals to explicit serial input/output/enable pads. It supports back-to-back
+LSB-first words without an idle edge, captures output enables atomically with
+each word, expands LPDDR4 SDR controls across pairs of DQ edges, and expands
+LPDDR5 CK/CA according to the WCK:CK ratio. LPDDR4 16-edge, LPDDR5 2:1/4:1,
+and RPC 8-edge data inputs are reassembled for their respective PHY cores.
+Analog phase shifts and vendor I/O primitives remain outer-wrapper concerns.
+
 ## Build and test
 
 Requirements: JDK 11+ and sbt 2.0.6 (the project launcher version).
