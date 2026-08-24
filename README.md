@@ -145,10 +145,14 @@ models otherwise. Artix-7-style LPDDR5 and RPC pad assemblies connect those
 lanes to their complete differential and bidirectional pad sets. The LPDDR5
 assembly supports both WCK:CK ratios by expanding 4-edge streams to the common
 8:1 DDR boundary, implements the fixed cross-word CS/CA phase shifts, and uses
-an externally shifted clock for RDQS. The RPC assembly exposes the distinct
-clock, command/write-data, read-data, and DQS clock phases used by LiteDRAM.
-Tests compile portable and synthesis branches with Verilator. The LPDDR4 16:8
-gearbox assembly and a Vivado device-library smoke test remain outstanding.
+an externally shifted clock for RDQS. A phase-aligned LPDDR4 16:8 gearbox maps
+the portable 16-edge boundary onto the same primitives, reconstructs input
+halves with the reference two-cycle latency, and uses an external sys8x_90 DQS
+clock. Both LPDDR pad assemblies reproduce LiteDRAM's data/DQS output-enable
+pipelines. The RPC assembly exposes the distinct clock, command/write-data,
+read-data, and DQS clock phases and registers tristate control across the two
+relevant domains. Tests compile portable and synthesis branches with Verilator.
+A Vivado device-library smoke test remains outstanding.
 
 ## Build and test
 

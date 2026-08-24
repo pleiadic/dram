@@ -116,6 +116,23 @@ class S7Lpddr5PhyIo(config: DramConfig, wckCkRatio: Int,
     attach(lane.io.padNegative, io.pads.wckNegative(byte))
   }
 
+  private val dqEnable = Module(new S7OutputEnableDelay(depth = 3, extend = true))
+  dqEnable.io.clock := io.dividedClock
+  dqEnable.io.reset := io.reset
+  dqEnable.io.input := io.parallel.dqOutputEnable
+  private val dmiEnable = Module(new S7OutputEnableDelay(depth = 3, extend = true))
+  dmiEnable.io.clock := io.dividedClock
+  dmiEnable.io.reset := io.reset
+  dmiEnable.io.input := io.parallel.dmiOutputEnable
+  private val readDqsEnable = Module(new S7OutputEnableDelay(depth = 2, extend = false))
+  readDqsEnable.io.clock := io.dividedClock
+  readDqsEnable.io.reset := io.reset
+  readDqsEnable.io.input := io.parallel.readDqsOutputEnable
+  private val delayedReadDqs = withClockAndReset(io.dividedClock, io.reset) {
+    RegInit(VecInit(Seq.fill(padBytes)(0.U(edgeCount.W))))
+  }
+  delayedReadDqs := io.parallel.readDqs
+
   for (bit <- 0 until padBits) {
     val lane = Module(new S7BidirectionalSerdesLane(8, "DDR", refClockFrequencyMHz))
     lane.io.reset := io.reset
@@ -128,7 +145,7 @@ class S7Lpddr5PhyIo(config: DramConfig, wckCkRatio: Int,
     lane.io.delayIncrement := io.delayIncrement && io.delaySelect(bit / 8)
     lane.io.bitslip := false.B
     lane.io.parallelOut := expand(io.parallel.dq(bit), edgeCount)
-    lane.io.outputEnable := io.parallel.dqOutputEnable
+    lane.io.outputEnable := dqEnable.io.output
     io.dqIn(bit) := decimate(lane.io.parallelIn)
     io.dqDelayValue(bit) := lane.io.delayValue
     attach(lane.io.pad, io.pads.dq(bit))
@@ -146,7 +163,7 @@ class S7Lpddr5PhyIo(config: DramConfig, wckCkRatio: Int,
     lane.io.delayIncrement := io.delayIncrement && io.delaySelect(byte)
     lane.io.bitslip := false.B
     lane.io.parallelOut := expand(io.parallel.dmi(byte), edgeCount)
-    lane.io.outputEnable := io.parallel.dmiOutputEnable
+    lane.io.outputEnable := dmiEnable.io.output
     io.dmiIn(byte) := decimate(lane.io.parallelIn)
     io.dmiDelayValue(byte) := lane.io.delayValue
     attach(lane.io.pad, io.pads.dmi(byte))
@@ -161,8 +178,8 @@ class S7Lpddr5PhyIo(config: DramConfig, wckCkRatio: Int,
     strobe.io.delayReset := io.delayReset && io.delaySelect(byte)
     strobe.io.delayIncrement := io.delayIncrement && io.delaySelect(byte)
     strobe.io.bitslip := false.B
-    strobe.io.parallelOut := expand(io.parallel.readDqs(byte), edgeCount)
-    strobe.io.outputEnable := io.parallel.readDqsOutputEnable
+    strobe.io.parallelOut := expand(delayedReadDqs(byte), edgeCount)
+    strobe.io.outputEnable := readDqsEnable.io.output
     io.readDqsIn(byte) := decimate(strobe.io.parallelIn)
     io.readDqsDelayValue(byte) := strobe.io.delayValue
     attach(strobe.io.padPositive, io.pads.readDqsPositive(byte))
@@ -229,6 +246,17 @@ class S7RpcPhyIo(config: DramConfig, refClockFrequencyMHz: Int = 200) extends Ra
   chipSelect.io.outputEnable := true.B
   io.pads.chipSelectN := chipSelect.io.serial
 
+  private val dbEnableCdc = Module(new S7OutputEnableCdc)
+  dbEnableCdc.io.reset := io.reset
+  dbEnableCdc.io.dividedClock := io.dividedClock
+  dbEnableCdc.io.outputClock := io.commandOutputSerialClock
+  dbEnableCdc.io.input := io.parallel.dbOutputEnable && io.dbEnable
+  private val dqsEnableCdc = Module(new S7OutputEnableCdc)
+  dqsEnableCdc.io.reset := io.reset
+  dqsEnableCdc.io.dividedClock := io.dividedClock
+  dqsEnableCdc.io.outputClock := io.dqsOutputSerialClock
+  dqsEnableCdc.io.input := io.parallel.dqsOutputEnable && io.dqsEnable
+
   private val strobe = Module(new S7BidirectionalSerdesLane(8, "DDR",
     refClockFrequencyMHz))
   strobe.io.reset := io.reset
@@ -257,7 +285,7 @@ class S7RpcPhyIo(config: DramConfig, refClockFrequencyMHz: Int = 200) extends Ra
     lane.io.delayIncrement := io.delayIncrement && io.delaySelect(bit / 8)
     lane.io.bitslip := false.B
     lane.io.parallelOut := io.parallel.db(bit)
-    lane.io.outputEnable := io.parallel.dbOutputEnable && io.dbEnable
+    lane.io.outputEnable := dbEnableCdc.io.output
     io.dbIn(bit) := lane.io.parallelIn
     io.dbDelayValue(bit) := lane.io.delayValue
     attach(lane.io.pad, io.pads.db(bit))
@@ -275,7 +303,7 @@ class S7RpcPhyIo(config: DramConfig, refClockFrequencyMHz: Int = 200) extends Ra
   dqs.io.delayIncrement := io.delayIncrement && io.delaySelect(0)
   dqs.io.bitslip := false.B
   dqs.io.parallelOut := io.parallel.dqs
-  dqs.io.outputEnable := io.parallel.dqsOutputEnable && io.dqsEnable
+  dqs.io.outputEnable := dqsEnableCdc.io.output
   io.dqsIn := dqs.io.parallelIn
   io.dqsDelayValue := dqs.io.delayValue
   attach(dqs.io.padPositive, io.pads.dqsPositive)

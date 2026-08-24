@@ -363,6 +363,74 @@ class S7DifferentialOutputSerdesLane extends RawModule {
   attach(buffer.io.padNegative, io.padNegative)
 }
 
+/** Single-ended output/tristate lane for write-only DMI-style pads. */
+class S7OutputSerdesIoLane extends RawModule {
+  val io = IO(new Bundle {
+    val reset = Input(Bool())
+    val serialClock = Input(Clock())
+    val dividedClock = Input(Clock())
+    val parallelOut = Input(UInt(8.W))
+    val outputEnable = Input(Bool())
+    val pad = Analog(1.W)
+  })
+
+  private val serializer = Module(new S7OutputSerdes(8, "DDR"))
+  private val buffer = Module(new S7IoBuffer)
+  serializer.io.reset := io.reset
+  serializer.io.serialClock := io.serialClock
+  serializer.io.dividedClock := io.dividedClock
+  serializer.io.data := io.parallelOut
+  serializer.io.outputEnable := io.outputEnable
+  buffer.io.outputData := serializer.io.serial
+  buffer.io.tristate := serializer.io.tristate
+  attach(buffer.io.pad, io.pad)
+}
+
+/**
+  * Controller-enable alignment used by the S7 LPDDR PHYs. When `extend` is
+  * true all registered taps are ORed to retain one word of margin at each end;
+  * otherwise only the last tap is used for DQS alignment.
+  */
+class S7OutputEnableDelay(depth: Int, extend: Boolean) extends RawModule {
+  require(depth >= 1)
+  val io = IO(new Bundle {
+    val clock = Input(Clock())
+    val reset = Input(Bool())
+    val input = Input(Bool())
+    val output = Output(Bool())
+  })
+
+  private val taps = withClockAndReset(io.clock, io.reset) {
+    RegInit(VecInit(Seq.fill(depth)(false.B)))
+  }
+  taps(0) := io.input
+  for (index <- 1 until depth) taps(index) := taps(index - 1)
+  io.output := (if (extend) taps.asUInt.orR else taps(depth - 1))
+}
+
+/** Two-domain tristate alignment used by LiteDRAM's RPC OSERDESE2 wrapper. */
+class S7OutputEnableCdc extends RawModule {
+  val io = IO(new Bundle {
+    val reset = Input(Bool())
+    val dividedClock = Input(Clock())
+    val outputClock = Input(Clock())
+    val input = Input(Bool())
+    val output = Output(Bool())
+  })
+
+  // The reference crosses the active-high tristate signal. Its registers
+  // reset low, so pads retain the same power-up behavior before the first CDC.
+  private val tristateDivided = withClockAndReset(io.dividedClock, io.reset) {
+    RegInit(false.B)
+  }
+  private val tristateOutput = withClockAndReset(io.outputClock, io.reset) {
+    RegInit(false.B)
+  }
+  tristateDivided := !io.input
+  tristateOutput := tristateDivided
+  io.output := !tristateOutput
+}
+
 /** Differential bidirectional S7 SerDes lane for DQS/RDQS. */
 class S7DifferentialBidirectionalSerdesLane(refClockFrequencyMHz: Int = 200)
     extends RawModule {
