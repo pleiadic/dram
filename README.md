@@ -129,6 +129,14 @@ enforces parallel reset, four serial-reset cycles, the reset wait, initial ZQ
 calibration, READY, and restricted Utility Register mode. Board wrappers supply
 the frequency-derived reset/ZQ cycle counts and physical serializers/tristates.
 
+The portable standard DDR PHY covers the common 1:4 DDR2, DDR3, and DDR4
+boundary used by 8:1 vendor SerDes. It expands each DFI command phase across
+both memory-clock edges, transposes rising/falling DQ and DM data, applies the
+DDR4 ACT command mux and active-low DM polarity, generates DQS/write-enable
+windows, supports per-byte read/write bitslip and write leveling, and maps
+deserialized DQ back into all four DFI read phases. Family-specific delay and
+I/O cells remain in the outer pad assembly.
+
 A common simulation SerDes boundary converts these portable parallel PHY
 signals to explicit serial input/output/enable pads. It supports back-to-back
 LSB-first words without an idle edge, captures output enables atomically with
