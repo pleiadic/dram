@@ -2,8 +2,26 @@ package pleiadic.dram
 
 import chisel3._
 import chisel3.experimental.{Analog, IntParam, StringParam, attach}
-import chisel3.util.HasBlackBoxInline
+import chisel3.util.{Cat, HasBlackBoxInline}
 import scala.language.reflectiveCalls
+
+/** Fixed cross-word bitslip used for S7 command/address phase alignment. */
+class S7ConstantBitSlip(width: Int, slip: Int) extends RawModule {
+  require(width >= 2 && slip >= 0 && slip < width)
+  val io = IO(new Bundle {
+    val clock = Input(Clock())
+    val reset = Input(Bool())
+    val input = Input(UInt(width.W))
+    val output = Output(UInt(width.W))
+  })
+  private val previous = withClockAndReset(io.clock, io.reset) {
+    RegInit(0.U(width.W))
+  }
+  previous := io.input
+  private val combined = Cat(io.input, previous)
+  private val internalPosition = width - 1 - slip
+  io.output := (combined >> (internalPosition + 1))(width - 1, 0)
+}
 
 /** Parameterized Xilinx 7-series OSERDESE2 wrapper (4:1 SDR or 8:1 DDR). */
 class S7OutputSerdes(dataWidth: Int = 8, dataRate: String = "DDR") extends
@@ -280,7 +298,8 @@ class S7BidirectionalSerdesLane(dataWidth: Int = 8, dataRate: String = "DDR",
     refClockFrequencyMHz: Int = 200) extends RawModule {
   val io = IO(new Bundle {
     val reset = Input(Bool())
-    val serialClock = Input(Clock())
+    val outputSerialClock = Input(Clock())
+    val inputSerialClock = Input(Clock())
     val invertedSerialClock = Input(Clock())
     val dividedClock = Input(Clock())
     val delayClock = Input(Clock())
@@ -300,7 +319,7 @@ class S7BidirectionalSerdesLane(dataWidth: Int = 8, dataRate: String = "DDR",
   private val input = Module(new S7InputSerdes(dataWidth, dataRate))
 
   output.io.reset := io.reset
-  output.io.serialClock := io.serialClock
+  output.io.serialClock := io.outputSerialClock
   output.io.dividedClock := io.dividedClock
   output.io.data := io.parallelOut
   output.io.outputEnable := io.outputEnable
@@ -312,8 +331,79 @@ class S7BidirectionalSerdesLane(dataWidth: Int = 8, dataRate: String = "DDR",
   delay.io.increment := io.delayIncrement
   delay.io.dataIn := buffer.io.inputData
   input.io.reset := io.reset
-  input.io.serialClock := io.serialClock
+  input.io.serialClock := io.inputSerialClock
   input.io.invertedSerialClock := io.invertedSerialClock
+  input.io.dividedClock := io.dividedClock
+  input.io.serial := delay.io.dataOut
+  input.io.bitslip := io.bitslip
+  io.parallelIn := input.io.data
+  io.delayValue := delay.io.value
+}
+
+/** Differential output-only 8:1 SerDes lane for CK and WCK. */
+class S7DifferentialOutputSerdesLane extends RawModule {
+  val io = IO(new Bundle {
+    val reset = Input(Bool())
+    val serialClock = Input(Clock())
+    val dividedClock = Input(Clock())
+    val parallelOut = Input(UInt(8.W))
+    val padPositive = Analog(1.W)
+    val padNegative = Analog(1.W)
+  })
+
+  private val serializer = Module(new S7OutputSerdes(8, "DDR"))
+  private val buffer = Module(new S7DifferentialOutputBuffer)
+  serializer.io.reset := io.reset
+  serializer.io.serialClock := io.serialClock
+  serializer.io.dividedClock := io.dividedClock
+  serializer.io.data := io.parallelOut
+  serializer.io.outputEnable := true.B
+  buffer.io.dataIn := serializer.io.serial
+  attach(buffer.io.padPositive, io.padPositive)
+  attach(buffer.io.padNegative, io.padNegative)
+}
+
+/** Differential bidirectional S7 SerDes lane for DQS/RDQS. */
+class S7DifferentialBidirectionalSerdesLane(refClockFrequencyMHz: Int = 200)
+    extends RawModule {
+  val io = IO(new Bundle {
+    val reset = Input(Bool())
+    val outputSerialClock = Input(Clock())
+    val inputSerialClock = Input(Clock())
+    val invertedInputSerialClock = Input(Clock())
+    val dividedClock = Input(Clock())
+    val delayClock = Input(Clock())
+    val delayReset = Input(Bool())
+    val delayIncrement = Input(Bool())
+    val bitslip = Input(Bool())
+    val parallelOut = Input(UInt(8.W))
+    val outputEnable = Input(Bool())
+    val parallelIn = Output(UInt(8.W))
+    val delayValue = Output(UInt(5.W))
+    val padPositive = Analog(1.W)
+    val padNegative = Analog(1.W)
+  })
+
+  private val output = Module(new S7OutputSerdes(8, "DDR"))
+  private val buffer = Module(new S7DifferentialIoBuffer)
+  private val delay = Module(new S7InputDelay(refClockFrequencyMHz))
+  private val input = Module(new S7InputSerdes(8, "DDR"))
+  output.io.reset := io.reset
+  output.io.serialClock := io.outputSerialClock
+  output.io.dividedClock := io.dividedClock
+  output.io.data := io.parallelOut
+  output.io.outputEnable := io.outputEnable
+  buffer.io.outputData := output.io.serial
+  buffer.io.tristate := output.io.tristate
+  attach(buffer.io.padPositive, io.padPositive)
+  attach(buffer.io.padNegative, io.padNegative)
+  delay.io.clock := io.delayClock
+  delay.io.reset := io.delayReset
+  delay.io.increment := io.delayIncrement
+  delay.io.dataIn := buffer.io.inputData
+  input.io.reset := io.reset
+  input.io.serialClock := io.inputSerialClock
+  input.io.invertedSerialClock := io.invertedInputSerialClock
   input.io.dividedClock := io.dividedClock
   input.io.serial := delay.io.dataOut
   input.io.bitslip := io.bitslip

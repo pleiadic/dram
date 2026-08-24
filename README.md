@@ -141,9 +141,14 @@ The Xilinx 7-series primitive layer now provides parameterized 4:1 SDR and
 8:1 DDR OSERDESE2/ISERDESE2 wrappers, variable IDELAYE2/ODELAYE2 controls,
 IOBUF/IOBUFDS/OBUFDS wrappers, and a composed bidirectional SerDes lane. Inline
 SystemVerilog selects real primitives for synthesis and deterministic portable
-models otherwise. Tests compile both branches with Verilator; a Vivado device
-library smoke test remains required when the family-specific pad wrappers are
-assembled.
+models otherwise. Artix-7-style LPDDR5 and RPC pad assemblies connect those
+lanes to their complete differential and bidirectional pad sets. The LPDDR5
+assembly supports both WCK:CK ratios by expanding 4-edge streams to the common
+8:1 DDR boundary, implements the fixed cross-word CS/CA phase shifts, and uses
+an externally shifted clock for RDQS. The RPC assembly exposes the distinct
+clock, command/write-data, read-data, and DQS clock phases used by LiteDRAM.
+Tests compile portable and synthesis branches with Verilator. The LPDDR4 16:8
+gearbox assembly and a Vivado device-library smoke test remain outstanding.
 
 ## Build and test
 

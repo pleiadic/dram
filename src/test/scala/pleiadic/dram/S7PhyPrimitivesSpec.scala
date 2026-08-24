@@ -85,7 +85,8 @@ class S7BidirectionalLaneHarness extends Module {
 
   private val lane = Module(new S7BidirectionalSerdesLane(8, "DDR", 200))
   lane.io.reset := reset.asBool
-  lane.io.serialClock := clock
+  lane.io.outputSerialClock := clock
+  lane.io.inputSerialClock := clock
   lane.io.invertedSerialClock := (!clock.asBool).asClock
   lane.io.dividedClock := clock
   lane.io.delayClock := clock
