@@ -189,6 +189,13 @@ ODDRX2DQA/B, IDDRX2DQA, TSHX2DQA, DQSBUFM, and DELAYG, including per-byte read
 delay, burst detection, and the cycle-exact DDRDLLA/ECLK initialization
 timeline. Portable and synthesis primitive branches are covered by Verilator.
 
+The Nexus DDR3 PHY reuses the same two-phase/four-edge portable boundary with
+the reference one-cycle-earlier write schedule. Its DDRDLL/DQSBUF initializer
+adds the LOADN/MOVE calibration steps, and fixed half-word slips align DQ, DM,
+DQS, and tristate streams with the later Nexus write primitives. The wrapper
+covers ODDRX2, ODDRX2DQ/DQS, IDDRX2DQ, TSHX2DQ/DQS, DQSBUF, and DELAYB, with
+16 read-delay positions and the same per-byte burst observation interface.
+
 A Vivado device-library smoke test remains outstanding.
 
 ## Build and test
