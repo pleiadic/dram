@@ -28,9 +28,12 @@ class S7Lpddr5Pads(config: DramConfig) extends Bundle {
   * External clock generation supplies the DQS-shifted output clock.
   */
 class S7Lpddr5PhyIo(config: DramConfig, wckCkRatio: Int,
-    refClockFrequencyMHz: Int = 200) extends RawModule {
+    refClockFrequencyMHz: Int = 200, withOutputDelay: Boolean = false,
+    readDqsOutputDelayInitialValue: Int = 0) extends RawModule {
   require(config.memType == "LPDDR5" && config.nPhases == 1)
   require(Set(2, 4).contains(wckCkRatio))
+  require(!withOutputDelay || (readDqsOutputDelayInitialValue >= 0 &&
+    readDqsOutputDelayInitialValue < 32))
   private val edgeCount = 2 * wckCkRatio
   private val padBits = config.effectivePadDataBits
   private val padBytes = padBits / 8
@@ -45,6 +48,12 @@ class S7Lpddr5PhyIo(config: DramConfig, wckCkRatio: Int,
     val delaySelect = Input(UInt(padBytes.W))
     val delayReset = Input(Bool())
     val delayIncrement = Input(Bool())
+    val commandOutputDelayReset = Input(Bool())
+    val commandOutputDelayIncrement = Input(Bool())
+    val dataOutputDelayReset = Input(Bool())
+    val dataOutputDelayIncrement = Input(Bool())
+    val readDqsOutputDelayReset = Input(Bool())
+    val readDqsOutputDelayIncrement = Input(Bool())
     val parallel = Input(new Lpddr5PhyOutput(config, wckCkRatio))
     val dqIn = Output(Vec(padBits, UInt(edgeCount.W)))
     val dmiIn = Output(Vec(padBytes, UInt(edgeCount.W)))
@@ -52,6 +61,9 @@ class S7Lpddr5PhyIo(config: DramConfig, wckCkRatio: Int,
     val dqDelayValue = Output(Vec(padBits, UInt(5.W)))
     val dmiDelayValue = Output(Vec(padBytes, UInt(5.W)))
     val readDqsDelayValue = Output(Vec(padBytes, UInt(5.W)))
+    val dqOutputDelayValue = Output(Vec(padBits, UInt(5.W)))
+    val dmiOutputDelayValue = Output(Vec(padBytes, UInt(5.W)))
+    val readDqsOutputDelayValue = Output(Vec(padBytes, UInt(5.W)))
     val pads = new S7Lpddr5Pads(config)
   })
 
@@ -66,36 +78,68 @@ class S7Lpddr5PhyIo(config: DramConfig, wckCkRatio: Int,
     VecInit((0 until edgeCount).map(edge => value(edge * step))).asUInt
   }
 
-  private def singleEndedOutput(value: UInt, clock: Clock): Bool = {
-    val serializer = Module(new S7OutputSerdes(8, "DDR"))
-    serializer.io.reset := io.reset
-    serializer.io.serialClock := clock
-    serializer.io.dividedClock := io.dividedClock
-    serializer.io.data := value
-    serializer.io.outputEnable := true.B
-    serializer.io.serial
+  private def singleEndedOutput(value: UInt, clock: Clock, delayReset: Bool,
+      delayIncrement: Bool): Bool = {
+    if (withOutputDelay) {
+      val output = Module(new S7DelayedOutputSerdes(refClockFrequencyMHz))
+      output.io.reset := io.reset
+      output.io.serialClock := clock
+      output.io.dividedClock := io.dividedClock
+      output.io.delayClock := io.delayClock
+      output.io.delayReset := io.reset || delayReset
+      output.io.delayIncrement := delayIncrement
+      output.io.parallelOut := value
+      output.io.outputEnable := true.B
+      output.io.serial
+    } else {
+      val serializer = Module(new S7OutputSerdes(8, "DDR"))
+      serializer.io.reset := io.reset
+      serializer.io.serialClock := clock
+      serializer.io.dividedClock := io.dividedClock
+      serializer.io.data := value
+      serializer.io.outputEnable := true.B
+      serializer.io.serial
+    }
   }
 
-  private val clockLane = Module(new S7DifferentialOutputSerdesLane)
-  clockLane.io.reset := io.reset
-  clockLane.io.serialClock := io.serialClock
-  clockLane.io.dividedClock := io.dividedClock
-  clockLane.io.parallelOut := expand(io.parallel.clock, 2)
-  attach(clockLane.io.padPositive, io.pads.clockPositive)
-  attach(clockLane.io.padNegative, io.pads.clockNegative)
+  if (withOutputDelay) {
+    val clockOutput = Module(new S7DelayedOutputSerdes(refClockFrequencyMHz))
+    val clockBuffer = Module(new S7DifferentialOutputBuffer)
+    clockOutput.io.reset := io.reset
+    clockOutput.io.serialClock := io.serialClock
+    clockOutput.io.dividedClock := io.dividedClock
+    clockOutput.io.delayClock := io.delayClock
+    clockOutput.io.delayReset := io.reset || io.commandOutputDelayReset
+    clockOutput.io.delayIncrement := io.commandOutputDelayIncrement
+    clockOutput.io.parallelOut := expand(io.parallel.clock, 2)
+    clockOutput.io.outputEnable := true.B
+    clockBuffer.io.dataIn := clockOutput.io.serial
+    attach(clockBuffer.io.padPositive, io.pads.clockPositive)
+    attach(clockBuffer.io.padNegative, io.pads.clockNegative)
+  } else {
+    val clockLane = Module(new S7DifferentialOutputSerdesLane)
+    clockLane.io.reset := io.reset
+    clockLane.io.serialClock := io.serialClock
+    clockLane.io.dividedClock := io.dividedClock
+    clockLane.io.parallelOut := expand(io.parallel.clock, 2)
+    attach(clockLane.io.padPositive, io.pads.clockPositive)
+    attach(clockLane.io.padNegative, io.pads.clockNegative)
+  }
 
   private val resetTwo = Fill(2, io.parallel.resetN)
   private val resetSlip = Module(new S7ConstantBitSlip(2, slip = 1))
   resetSlip.io.clock := io.dividedClock
   resetSlip.io.reset := io.reset
   resetSlip.io.input := resetTwo
-  io.pads.resetN := singleEndedOutput(expand(resetSlip.io.output, 2), io.serialClock)
+  io.pads.resetN := singleEndedOutput(expand(resetSlip.io.output, 2), io.serialClock,
+    io.commandOutputDelayReset, io.commandOutputDelayIncrement)
 
   private val csSlip = Module(new S7ConstantBitSlip(2, slip = 1))
   csSlip.io.clock := io.dividedClock
   csSlip.io.reset := io.reset
   csSlip.io.input := Fill(2, io.parallel.cs)
-  io.pads.cs := singleEndedOutput(expand(csSlip.io.output, 2), io.serialClock)
+  io.pads.cs := singleEndedOutput(expand(csSlip.io.output, 2), io.serialClock,
+    io.commandOutputDelayReset, io.commandOutputDelayIncrement)
 
   for (line <- 0 until 7) {
     val widened = VecInit((0 until 4).map(edge => io.parallel.ca(line)(edge / 2))).asUInt
@@ -103,17 +147,34 @@ class S7Lpddr5PhyIo(config: DramConfig, wckCkRatio: Int,
     slip.io.clock := io.dividedClock
     slip.io.reset := io.reset
     slip.io.input := widened
-    io.pads.ca(line) := singleEndedOutput(expand(slip.io.output, 4), io.serialClock)
+    io.pads.ca(line) := singleEndedOutput(expand(slip.io.output, 4), io.serialClock,
+      io.commandOutputDelayReset, io.commandOutputDelayIncrement)
   }
 
   for (byte <- 0 until padBytes) {
-    val lane = Module(new S7DifferentialOutputSerdesLane)
-    lane.io.reset := io.reset
-    lane.io.serialClock := io.serialClock
-    lane.io.dividedClock := io.dividedClock
-    lane.io.parallelOut := expand(io.parallel.wck(byte), edgeCount)
-    attach(lane.io.padPositive, io.pads.wckPositive(byte))
-    attach(lane.io.padNegative, io.pads.wckNegative(byte))
+    if (withOutputDelay) {
+      val lane = Module(new S7DelayedDifferentialOutputSerdesIoLane(
+        refClockFrequencyMHz))
+      lane.io.reset := io.reset
+      lane.io.serialClock := io.serialClock
+      lane.io.dividedClock := io.dividedClock
+      lane.io.delayClock := io.delayClock
+      lane.io.delayReset := io.reset ||
+        (io.dataOutputDelayReset && io.delaySelect(byte))
+      lane.io.delayIncrement := io.dataOutputDelayIncrement && io.delaySelect(byte)
+      lane.io.parallelOut := expand(io.parallel.wck(byte), edgeCount)
+      lane.io.outputEnable := true.B
+      attach(lane.io.padPositive, io.pads.wckPositive(byte))
+      attach(lane.io.padNegative, io.pads.wckNegative(byte))
+    } else {
+      val lane = Module(new S7DifferentialOutputSerdesLane)
+      lane.io.reset := io.reset
+      lane.io.serialClock := io.serialClock
+      lane.io.dividedClock := io.dividedClock
+      lane.io.parallelOut := expand(io.parallel.wck(byte), edgeCount)
+      attach(lane.io.padPositive, io.pads.wckPositive(byte))
+      attach(lane.io.padNegative, io.pads.wckNegative(byte))
+    }
   }
 
   private val dqEnable = Module(new S7OutputEnableDelay(depth = 3, extend = true))
@@ -134,58 +195,142 @@ class S7Lpddr5PhyIo(config: DramConfig, wckCkRatio: Int,
   delayedReadDqs := io.parallel.readDqs
 
   for (bit <- 0 until padBits) {
-    val lane = Module(new S7BidirectionalSerdesLane(8, "DDR", refClockFrequencyMHz))
-    lane.io.reset := io.reset
-    lane.io.outputSerialClock := io.serialClock
-    lane.io.inputSerialClock := io.serialClock
-    lane.io.invertedSerialClock := io.invertedSerialClock
-    lane.io.dividedClock := io.dividedClock
-    lane.io.delayClock := io.delayClock
-    lane.io.delayReset := io.delayReset && io.delaySelect(bit / 8)
-    lane.io.delayIncrement := io.delayIncrement && io.delaySelect(bit / 8)
-    lane.io.bitslip := false.B
-    lane.io.parallelOut := expand(io.parallel.dq(bit), edgeCount)
-    lane.io.outputEnable := dqEnable.io.output
-    io.dqIn(bit) := decimate(lane.io.parallelIn)
-    io.dqDelayValue(bit) := lane.io.delayValue
-    attach(lane.io.pad, io.pads.dq(bit))
+    if (withOutputDelay) {
+      val lane = Module(new S7DelayedBidirectionalSerdesLane(refClockFrequencyMHz))
+      lane.io.reset := io.reset
+      lane.io.outputSerialClock := io.serialClock
+      lane.io.inputSerialClock := io.serialClock
+      lane.io.invertedInputSerialClock := io.invertedSerialClock
+      lane.io.dividedClock := io.dividedClock
+      lane.io.delayClock := io.delayClock
+      lane.io.inputDelayReset := io.delayReset && io.delaySelect(bit / 8)
+      lane.io.inputDelayIncrement := io.delayIncrement && io.delaySelect(bit / 8)
+      lane.io.outputDelayReset := io.reset ||
+        (io.dataOutputDelayReset && io.delaySelect(bit / 8))
+      lane.io.outputDelayIncrement := io.dataOutputDelayIncrement && io.delaySelect(bit / 8)
+      lane.io.bitslip := false.B
+      lane.io.parallelOut := expand(io.parallel.dq(bit), edgeCount)
+      lane.io.outputEnable := dqEnable.io.output
+      io.dqIn(bit) := decimate(lane.io.parallelIn)
+      io.dqDelayValue(bit) := lane.io.inputDelayValue
+      io.dqOutputDelayValue(bit) := lane.io.outputDelayValue
+      attach(lane.io.pad, io.pads.dq(bit))
+    } else {
+      val lane = Module(new S7BidirectionalSerdesLane(8, "DDR", refClockFrequencyMHz))
+      lane.io.reset := io.reset
+      lane.io.outputSerialClock := io.serialClock
+      lane.io.inputSerialClock := io.serialClock
+      lane.io.invertedSerialClock := io.invertedSerialClock
+      lane.io.dividedClock := io.dividedClock
+      lane.io.delayClock := io.delayClock
+      lane.io.delayReset := io.delayReset && io.delaySelect(bit / 8)
+      lane.io.delayIncrement := io.delayIncrement && io.delaySelect(bit / 8)
+      lane.io.bitslip := false.B
+      lane.io.parallelOut := expand(io.parallel.dq(bit), edgeCount)
+      lane.io.outputEnable := dqEnable.io.output
+      io.dqIn(bit) := decimate(lane.io.parallelIn)
+      io.dqDelayValue(bit) := lane.io.delayValue
+      io.dqOutputDelayValue(bit) := 0.U
+      attach(lane.io.pad, io.pads.dq(bit))
+    }
   }
 
   for (byte <- 0 until padBytes) {
-    val lane = Module(new S7BidirectionalSerdesLane(8, "DDR", refClockFrequencyMHz))
-    lane.io.reset := io.reset
-    lane.io.outputSerialClock := io.serialClock
-    lane.io.inputSerialClock := io.serialClock
-    lane.io.invertedSerialClock := io.invertedSerialClock
-    lane.io.dividedClock := io.dividedClock
-    lane.io.delayClock := io.delayClock
-    lane.io.delayReset := io.delayReset && io.delaySelect(byte)
-    lane.io.delayIncrement := io.delayIncrement && io.delaySelect(byte)
-    lane.io.bitslip := false.B
-    lane.io.parallelOut := expand(io.parallel.dmi(byte), edgeCount)
-    lane.io.outputEnable := dmiEnable.io.output
-    io.dmiIn(byte) := decimate(lane.io.parallelIn)
-    io.dmiDelayValue(byte) := lane.io.delayValue
-    attach(lane.io.pad, io.pads.dmi(byte))
+    if (withOutputDelay) {
+      val lane = Module(new S7DelayedBidirectionalSerdesLane(refClockFrequencyMHz))
+      lane.io.reset := io.reset
+      lane.io.outputSerialClock := io.serialClock
+      lane.io.inputSerialClock := io.serialClock
+      lane.io.invertedInputSerialClock := io.invertedSerialClock
+      lane.io.dividedClock := io.dividedClock
+      lane.io.delayClock := io.delayClock
+      lane.io.inputDelayReset := io.delayReset && io.delaySelect(byte)
+      lane.io.inputDelayIncrement := io.delayIncrement && io.delaySelect(byte)
+      lane.io.outputDelayReset := io.reset ||
+        (io.dataOutputDelayReset && io.delaySelect(byte))
+      lane.io.outputDelayIncrement := io.dataOutputDelayIncrement && io.delaySelect(byte)
+      lane.io.bitslip := false.B
+      lane.io.parallelOut := expand(io.parallel.dmi(byte), edgeCount)
+      lane.io.outputEnable := dmiEnable.io.output
+      io.dmiIn(byte) := decimate(lane.io.parallelIn)
+      io.dmiDelayValue(byte) := lane.io.inputDelayValue
+      io.dmiOutputDelayValue(byte) := lane.io.outputDelayValue
+      attach(lane.io.pad, io.pads.dmi(byte))
 
-    val strobe = Module(new S7DifferentialBidirectionalSerdesLane(refClockFrequencyMHz))
-    strobe.io.reset := io.reset
-    strobe.io.outputSerialClock := io.shiftedStrobeOutputClock
-    strobe.io.inputSerialClock := io.serialClock
-    strobe.io.invertedInputSerialClock := io.invertedSerialClock
-    strobe.io.dividedClock := io.dividedClock
-    strobe.io.delayClock := io.delayClock
-    strobe.io.delayReset := io.delayReset && io.delaySelect(byte)
-    strobe.io.delayIncrement := io.delayIncrement && io.delaySelect(byte)
-    strobe.io.bitslip := false.B
-    strobe.io.parallelOut := expand(delayedReadDqs(byte), edgeCount)
-    strobe.io.outputEnable := readDqsEnable.io.output
-    io.readDqsIn(byte) := decimate(strobe.io.parallelIn)
-    io.readDqsDelayValue(byte) := strobe.io.delayValue
-    attach(strobe.io.padPositive, io.pads.readDqsPositive(byte))
-    attach(strobe.io.padNegative, io.pads.readDqsNegative(byte))
+      val strobe = Module(new S7DelayedDifferentialBidirectionalSerdesLane(
+        refClockFrequencyMHz, readDqsOutputDelayInitialValue))
+      strobe.io.reset := io.reset
+      strobe.io.outputSerialClock := io.serialClock
+      strobe.io.inputSerialClock := io.serialClock
+      strobe.io.invertedInputSerialClock := io.invertedSerialClock
+      strobe.io.dividedClock := io.dividedClock
+      strobe.io.delayClock := io.delayClock
+      strobe.io.inputDelayReset := io.delayReset && io.delaySelect(byte)
+      strobe.io.inputDelayIncrement := io.delayIncrement && io.delaySelect(byte)
+      strobe.io.outputDelayReset := io.reset ||
+        (io.readDqsOutputDelayReset && io.delaySelect(byte))
+      strobe.io.outputDelayIncrement :=
+        io.readDqsOutputDelayIncrement && io.delaySelect(byte)
+      strobe.io.bitslip := false.B
+      strobe.io.parallelOut := expand(io.parallel.readDqs(byte), edgeCount)
+      strobe.io.outputEnable := readDqsEnable.io.output
+      io.readDqsIn(byte) := decimate(strobe.io.parallelIn)
+      io.readDqsDelayValue(byte) := strobe.io.inputDelayValue
+      io.readDqsOutputDelayValue(byte) := strobe.io.outputDelayValue
+      attach(strobe.io.padPositive, io.pads.readDqsPositive(byte))
+      attach(strobe.io.padNegative, io.pads.readDqsNegative(byte))
+    } else {
+      val lane = Module(new S7BidirectionalSerdesLane(8, "DDR", refClockFrequencyMHz))
+      lane.io.reset := io.reset
+      lane.io.outputSerialClock := io.serialClock
+      lane.io.inputSerialClock := io.serialClock
+      lane.io.invertedSerialClock := io.invertedSerialClock
+      lane.io.dividedClock := io.dividedClock
+      lane.io.delayClock := io.delayClock
+      lane.io.delayReset := io.delayReset && io.delaySelect(byte)
+      lane.io.delayIncrement := io.delayIncrement && io.delaySelect(byte)
+      lane.io.bitslip := false.B
+      lane.io.parallelOut := expand(io.parallel.dmi(byte), edgeCount)
+      lane.io.outputEnable := dmiEnable.io.output
+      io.dmiIn(byte) := decimate(lane.io.parallelIn)
+      io.dmiDelayValue(byte) := lane.io.delayValue
+      io.dmiOutputDelayValue(byte) := 0.U
+      attach(lane.io.pad, io.pads.dmi(byte))
+
+      val strobe = Module(new S7DifferentialBidirectionalSerdesLane(refClockFrequencyMHz))
+      strobe.io.reset := io.reset
+      strobe.io.outputSerialClock := io.shiftedStrobeOutputClock
+      strobe.io.inputSerialClock := io.serialClock
+      strobe.io.invertedInputSerialClock := io.invertedSerialClock
+      strobe.io.dividedClock := io.dividedClock
+      strobe.io.delayClock := io.delayClock
+      strobe.io.delayReset := io.delayReset && io.delaySelect(byte)
+      strobe.io.delayIncrement := io.delayIncrement && io.delaySelect(byte)
+      strobe.io.bitslip := false.B
+      strobe.io.parallelOut := expand(delayedReadDqs(byte), edgeCount)
+      strobe.io.outputEnable := readDqsEnable.io.output
+      io.readDqsIn(byte) := decimate(strobe.io.parallelIn)
+      io.readDqsDelayValue(byte) := strobe.io.delayValue
+      io.readDqsOutputDelayValue(byte) := 0.U
+      attach(strobe.io.padPositive, io.pads.readDqsPositive(byte))
+      attach(strobe.io.padNegative, io.pads.readDqsNegative(byte))
+    }
   }
 }
+
+class A7Lpddr5PhyIo(config: DramConfig, wckCkRatio: Int,
+    refClockFrequencyMHz: Int = 200) extends S7Lpddr5PhyIo(config, wckCkRatio,
+  refClockFrequencyMHz, withOutputDelay = false)
+
+class K7Lpddr5PhyIo(config: DramConfig, wckCkRatio: Int,
+    refClockFrequencyMHz: Int = 200, readDqsOutputDelayInitialValue: Int = 0)
+    extends S7Lpddr5PhyIo(config, wckCkRatio, refClockFrequencyMHz,
+      withOutputDelay = true, readDqsOutputDelayInitialValue)
+
+class V7Lpddr5PhyIo(config: DramConfig, wckCkRatio: Int,
+    refClockFrequencyMHz: Int = 200, readDqsOutputDelayInitialValue: Int = 0)
+    extends S7Lpddr5PhyIo(config, wckCkRatio, refClockFrequencyMHz,
+      withOutputDelay = true, readDqsOutputDelayInitialValue)
 
 class S7RpcPads(config: DramConfig) extends Bundle {
   private val padBits = config.effectivePadDataBits

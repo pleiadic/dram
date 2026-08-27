@@ -28,7 +28,8 @@ class S7ConstantBitSlipHarness extends Module {
 }
 
 /** Keeps all Verilator-visible data ports narrow while exercising every LPDDR5 pad lane. */
-class S7Lpddr5PhyIoHarness(wckCkRatio: Int) extends Module {
+class S7Lpddr5PhyIoHarness(wckCkRatio: Int, withOutputDelay: Boolean = false)
+    extends Module {
   private val config = DramConfig(addressBits = 40, dataBits = 128, bankBits = 7,
     rowBits = 18, columnBits = 10, memType = "LPDDR5", padDataBits = 8)
   val io = IO(new Bundle {
@@ -41,6 +42,9 @@ class S7Lpddr5PhyIoHarness(wckCkRatio: Int) extends Module {
     val dqDelayValue = Output(UInt(5.W))
     val dmiDelayValue = Output(UInt(5.W))
     val readDqsDelayValue = Output(UInt(5.W))
+    val dqOutputDelayValue = Output(UInt(5.W))
+    val dmiOutputDelayValue = Output(UInt(5.W))
+    val readDqsOutputDelayValue = Output(UInt(5.W))
     val clockPositive = Analog(1.W)
     val clockNegative = Analog(1.W)
     val dq = Vec(8, Analog(1.W))
@@ -51,7 +55,8 @@ class S7Lpddr5PhyIoHarness(wckCkRatio: Int) extends Module {
     val dmi = Analog(1.W)
   })
 
-  private val phy = Module(new S7Lpddr5PhyIo(config, wckCkRatio))
+  private val phy = Module(new S7Lpddr5PhyIo(config, wckCkRatio,
+    withOutputDelay = withOutputDelay, readDqsOutputDelayInitialValue = 9))
   phy.io.reset := reset.asBool
   phy.io.dividedClock := clock
   phy.io.serialClock := clock
@@ -61,6 +66,12 @@ class S7Lpddr5PhyIoHarness(wckCkRatio: Int) extends Module {
   phy.io.delaySelect := 0.U
   phy.io.delayReset := false.B
   phy.io.delayIncrement := false.B
+  phy.io.commandOutputDelayReset := false.B
+  phy.io.commandOutputDelayIncrement := false.B
+  phy.io.dataOutputDelayReset := false.B
+  phy.io.dataOutputDelayIncrement := false.B
+  phy.io.readDqsOutputDelayReset := false.B
+  phy.io.readDqsOutputDelayIncrement := false.B
   phy.io.parallel.resetN := io.resetN
   phy.io.parallel.clock := 1.U
   phy.io.parallel.cs := io.cs
@@ -81,6 +92,9 @@ class S7Lpddr5PhyIoHarness(wckCkRatio: Int) extends Module {
   io.dqDelayValue := phy.io.dqDelayValue(0)
   io.dmiDelayValue := phy.io.dmiDelayValue(0)
   io.readDqsDelayValue := phy.io.readDqsDelayValue(0)
+  io.dqOutputDelayValue := phy.io.dqOutputDelayValue(0)
+  io.dmiOutputDelayValue := phy.io.dmiOutputDelayValue(0)
+  io.readDqsOutputDelayValue := phy.io.readDqsOutputDelayValue(0)
   attach(io.clockPositive, phy.io.pads.clockPositive)
   attach(io.clockNegative, phy.io.pads.clockNegative)
   for (bit <- 0 until 8) attach(io.dq(bit), phy.io.pads.dq(bit))
@@ -192,7 +206,24 @@ class S7PhyIoSpec extends AnyFlatSpec with ChiselScalatestTester {
         dut.io.dqDelayValue.expect(0.U)
         dut.io.dmiDelayValue.expect(0.U)
         dut.io.readDqsDelayValue.expect(0.U)
+        dut.io.dqOutputDelayValue.expect(0.U)
+        dut.io.dmiOutputDelayValue.expect(0.U)
+        dut.io.readDqsOutputDelayValue.expect(0.U)
       }
+    }
+  }
+
+  it should "model Kintex/Virtex command data and RDQS output delays" in {
+    test(new S7Lpddr5PhyIoHarness(wckCkRatio = 4, withOutputDelay = true))
+      .withAnnotations(verilator) { dut =>
+      dut.io.resetN.poke(true.B)
+      dut.io.cs.poke(true.B)
+      dut.io.ca0.poke(1.U)
+      dut.clock.step(2)
+      dut.io.resetNPad.expect(true.B)
+      dut.io.dqOutputDelayValue.expect(0.U)
+      dut.io.dmiOutputDelayValue.expect(0.U)
+      dut.io.readDqsOutputDelayValue.expect(9.U)
     }
   }
 
@@ -209,7 +240,8 @@ class S7PhyIoSpec extends AnyFlatSpec with ChiselScalatestTester {
   }
 
   it should "parse the real Xilinx primitive branches in the family assembly" in {
-    test(new S7Lpddr5PhyIoHarness(wckCkRatio = 4)).withAnnotations(Seq(
+    test(new S7Lpddr5PhyIoHarness(wckCkRatio = 4, withOutputDelay = true))
+      .withAnnotations(Seq(
       VerilatorBackendAnnotation,
       VerilatorFlags(Seq("-DSYNTHESIS", "-Wno-MODMISSING")),
       VerilatorCFlags(Seq("-DWData=IData")))) { dut =>

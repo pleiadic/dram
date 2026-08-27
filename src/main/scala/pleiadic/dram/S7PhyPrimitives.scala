@@ -536,6 +536,63 @@ class S7DelayedDifferentialOutputSerdesIoLane(refClockFrequencyMHz: Int = 200,
   io.delayValue := output.io.delayValue
 }
 
+/** Differential bidirectional lane with independent ODELAYE2 and IDELAYE2. */
+class S7DelayedDifferentialBidirectionalSerdesLane(
+    refClockFrequencyMHz: Int = 200, outputInitialValue: Int = 0)
+    extends RawModule {
+  val io = IO(new Bundle {
+    val reset = Input(Bool())
+    val outputSerialClock = Input(Clock())
+    val inputSerialClock = Input(Clock())
+    val invertedInputSerialClock = Input(Clock())
+    val dividedClock = Input(Clock())
+    val delayClock = Input(Clock())
+    val inputDelayReset = Input(Bool())
+    val inputDelayIncrement = Input(Bool())
+    val outputDelayReset = Input(Bool())
+    val outputDelayIncrement = Input(Bool())
+    val bitslip = Input(Bool())
+    val parallelOut = Input(UInt(8.W))
+    val outputEnable = Input(Bool())
+    val parallelIn = Output(UInt(8.W))
+    val inputDelayValue = Output(UInt(5.W))
+    val outputDelayValue = Output(UInt(5.W))
+    val padPositive = Analog(1.W)
+    val padNegative = Analog(1.W)
+  })
+
+  private val output = Module(new S7DelayedOutputSerdes(refClockFrequencyMHz,
+    outputInitialValue))
+  private val buffer = Module(new S7DifferentialIoBuffer)
+  private val inputDelay = Module(new S7InputDelay(refClockFrequencyMHz))
+  private val input = Module(new S7InputSerdes(8, "DDR"))
+  output.io.reset := io.reset
+  output.io.serialClock := io.outputSerialClock
+  output.io.dividedClock := io.dividedClock
+  output.io.delayClock := io.delayClock
+  output.io.delayReset := io.outputDelayReset
+  output.io.delayIncrement := io.outputDelayIncrement
+  output.io.parallelOut := io.parallelOut
+  output.io.outputEnable := io.outputEnable
+  buffer.io.outputData := output.io.serial
+  buffer.io.tristate := output.io.tristate
+  attach(buffer.io.padPositive, io.padPositive)
+  attach(buffer.io.padNegative, io.padNegative)
+  inputDelay.io.clock := io.delayClock
+  inputDelay.io.reset := io.inputDelayReset
+  inputDelay.io.increment := io.inputDelayIncrement
+  inputDelay.io.dataIn := buffer.io.inputData
+  input.io.reset := io.reset
+  input.io.serialClock := io.inputSerialClock
+  input.io.invertedSerialClock := io.invertedInputSerialClock
+  input.io.dividedClock := io.dividedClock
+  input.io.serial := inputDelay.io.dataOut
+  input.io.bitslip := io.bitslip
+  io.parallelIn := input.io.data
+  io.inputDelayValue := inputDelay.io.value
+  io.outputDelayValue := output.io.delayValue
+}
+
 /**
   * Controller-enable alignment used by the S7 LPDDR PHYs. When `extend` is
   * true all registered taps are ORed to retain one word of margin at each end;

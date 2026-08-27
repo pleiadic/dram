@@ -158,7 +158,10 @@ models otherwise. Artix-7-style LPDDR5 and RPC pad assemblies connect those
 lanes to their complete differential and bidirectional pad sets. The LPDDR5
 assembly supports both WCK:CK ratios by expanding 4-edge streams to the common
 8:1 DDR boundary, implements the fixed cross-word CS/CA phase shifts, and uses
-an externally shifted clock for RDQS. A phase-aligned LPDDR4 16:8 gearbox maps
+an externally shifted clock for RDQS on Artix-7. Kintex-7 and Virtex-7 variants
+route CK/CA/WCK and DQ/DMI through separately controlled ODELAY groups and use
+an independently calibrated differential ODELAY+IDELAY RDQS lane. A
+phase-aligned LPDDR4 16:8 gearbox maps
 the portable 16-edge boundary onto the same primitives, reconstructs input
 halves with the reference two-cycle latency, and uses an external sys8x_90 DQS
 clock. Both LPDDR pad assemblies reproduce LiteDRAM's data/DQS output-enable
