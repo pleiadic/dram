@@ -196,7 +196,16 @@ DQS, and tristate streams with the later Nexus write primitives. The wrapper
 covers ODDRX2, ODDRX2DQ/DQS, IDDRX2DQ, TSHX2DQ/DQS, DQSBUF, and DELAYB, with
 16 read-delay positions and the same per-byte burst observation interface.
 
-A Vivado device-library smoke test remains outstanding.
+The Gowin DDR3 PHY uses one family-selectable assembly for GW2A and GW5A. It
+reuses the half-rate portable boundary, implements the ten-event DLL/edge-clock
+initialization timeline, eight-position per-byte read training, burst status,
+and differential CK/DQS pads. The synthesis branches cover OSER4,
+OSER4_MEM, IDES4_MEM, DQS, IODELAY, IOBUF, ELVDS_OBUF, and ELVDS_IOBUF; the
+family selector accounts for the GW2A `DLL`/GW5A `DDRDLL` and IODELAY port
+differences. Portable, synthesis-parse, and core-to-pad integration tests cover
+both families.
+
+Vivado and Gowin device-library smoke tests remain outstanding.
 
 ## Build and test
 
