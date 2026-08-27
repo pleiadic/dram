@@ -181,10 +181,13 @@ for this E3 boundary. The current pad bundle models one DQS pair per byte;
 x4 DIMM duplication and registered/clam-shell board topologies remain wrapper
 extensions.
 
-The ECP5 work starts with a cycle-exact DDRDLLA/DDQBUFM/ECLK initializer. It
-synchronizes DLL lock and performs the reference freeze, ECLK stop/reset,
-unfreeze, DQS pause, DLL update, and resume events at eight-cycle intervals.
-The half-rate BL8 data path and DQSBUFM lane assembly are the next ECP5 layer.
+The ECP5 DDR3 PHY provides a half-rate two-phase DFI boundary with four DQ
+edges per phase. It emits each BL8 write over two x2 primitive words, joins two
+IDDRX2 input halves, implements read bitslip and command/read/write latency,
+and exposes DQS preamble/postamble control. Its pad assembly wraps ODDRX2F,
+ODDRX2DQA/B, IDDRX2DQA, TSHX2DQA, DQSBUFM, and DELAYG, including per-byte read
+delay, burst detection, and the cycle-exact DDRDLLA/ECLK initialization
+timeline. Portable and synthesis primitive branches are covered by Verilator.
 
 A Vivado device-library smoke test remains outstanding.
 
