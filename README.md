@@ -181,6 +181,11 @@ for this E3 boundary. The current pad bundle models one DQS pair per byte;
 x4 DIMM duplication and registered/clam-shell board topologies remain wrapper
 extensions.
 
+The ECP5 work starts with a cycle-exact DDRDLLA/DDQBUFM/ECLK initializer. It
+synchronizes DLL lock and performs the reference freeze, ECLK stop/reset,
+unfreeze, DQS pause, DLL update, and resume events at eight-cycle intervals.
+The half-rate BL8 data path and DQSBUFM lane assembly are the next ECP5 layer.
+
 A Vivado device-library smoke test remains outstanding.
 
 ## Build and test
