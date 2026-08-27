@@ -170,6 +170,17 @@ Both LPDDR pad assemblies reproduce LiteDRAM's data/DQS output-enable
 pipelines. The RPC assembly exposes the distinct clock, command/write-data,
 read-data, and DQS clock phases and registers tristate control across the two
 relevant domains. Tests compile portable and synthesis branches with Verilator.
+
+The UltraScale primitive layer provides fixed 8:1 OSERDESE3/ISERDESE3,
+nine-bit TIME-mode IDELAYE3/ODELAYE3 with voltage/temperature compensation,
+and IOBUFDSE3 differential lanes for both UltraScale and UltraScale+. Its
+DDR3/DDR4 pad assembly places CK/commands, DQ/DM, and DQS in independently
+trainable delay groups; DQS accepts the quarter-cycle phase offset in
+picoseconds. Use the portable standard PHY's one-cycle output-enable setting
+for this E3 boundary. The current pad bundle models one DQS pair per byte;
+x4 DIMM duplication and registered/clam-shell board topologies remain wrapper
+extensions.
+
 A Vivado device-library smoke test remains outstanding.
 
 ## Build and test

@@ -33,13 +33,14 @@ class StandardDdrPhyOutput(config: DramConfig) extends Bundle {
   * The layout follows S7DDRPHY's 8:1 OSERDESE2/ISERDESE2 boundary.
   */
 class StandardDdrPhy(config: DramConfig, readLatency: Int, writeLatency: Int,
-    withDataMask: Boolean = true) extends Module {
+    withDataMask: Boolean = true, outputEnableDelayCycles: Int = 2) extends Module {
   require(Set("DDR2", "DDR3", "DDR4").contains(config.memType))
   require(config.nPhases == 4, "the portable standard DDR PHY currently implements 1:4")
   require(config.dfiDataBits == 2 * config.effectivePadDataBits,
     "each DFI phase must contain the rising and falling DQ words")
   require(readLatency >= 1)
   require(writeLatency >= 2, "DQS preamble requires a write-enable tap before the data tap")
+  require(outputEnableDelayCycles >= 1)
   private val addressBits = config.rowBits.max(config.columnBits).max(11)
   private val padBits = config.effectivePadDataBits
   private val padBytes = padBits / 8
@@ -133,14 +134,18 @@ class StandardDdrPhy(config: DramConfig, readLatency: Int, writeLatency: Int,
   io.writePreamble := preamble
   io.writePostamble := postamble
 
-  private val dqEnableDelay = RegInit(VecInit(Seq.fill(2)(false.B)))
-  private val dqsEnableDelay = RegInit(VecInit(Seq.fill(2)(false.B)))
+  private val dqEnableDelay = RegInit(VecInit(
+    Seq.fill(outputEnableDelayCycles)(false.B)))
+  private val dqsEnableDelay = RegInit(VecInit(
+    Seq.fill(outputEnableDelayCycles)(false.B)))
   dqEnableDelay(0) := preamble || dataEnable || postamble
   dqsEnableDelay(0) := preamble || Mux(io.writeLevelingEnable, true.B, dataEnable) || postamble
-  dqEnableDelay(1) := dqEnableDelay(0)
-  dqsEnableDelay(1) := dqsEnableDelay(0)
-  io.output.dqOutputEnable := dqEnableDelay(1)
-  io.output.dqsOutputEnable := dqsEnableDelay(1)
+  for (index <- 1 until outputEnableDelayCycles) {
+    dqEnableDelay(index) := dqEnableDelay(index - 1)
+    dqsEnableDelay(index) := dqsEnableDelay(index - 1)
+  }
+  io.output.dqOutputEnable := dqEnableDelay.last
+  io.output.dqsOutputEnable := dqsEnableDelay.last
 
   private val dqsPattern = Module(new DqsPattern)
   // S7DDRPHY extends the tristate window for pre/postamble but leaves the
