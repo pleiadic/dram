@@ -72,7 +72,8 @@ class S7OutputEnableDelayHarness extends Module {
   io.cdc := cdc.io.output
 }
 
-class S7Lpddr4PhyIoHarness extends Module {
+class S7Lpddr4PhyIoHarness(family: String = "A7") extends Module {
+  require(Set("A7", "K7", "V7").contains(family))
   private val config = DramConfig(addressBits = 40, dataBits = 128, bankBits = 6,
     rowBits = 17, columnBits = 10, memType = "LPDDR4", nPhases = 8,
     padDataBits = 8)
@@ -85,6 +86,9 @@ class S7Lpddr4PhyIoHarness extends Module {
     val ca0Pad = Output(Bool())
     val dqDelayValue = Output(UInt(5.W))
     val dqsDelayValue = Output(UInt(5.W))
+    val dqOutputDelayValue = Output(UInt(5.W))
+    val dmiOutputDelayValue = Output(UInt(5.W))
+    val dqsOutputDelayValue = Output(UInt(5.W))
     val clockPositive = Analog(1.W)
     val clockNegative = Analog(1.W)
     val dq = Vec(8, Analog(1.W))
@@ -95,7 +99,13 @@ class S7Lpddr4PhyIoHarness extends Module {
 
   private val controllerClockLevel = RegInit(false.B)
   controllerClockLevel := !controllerClockLevel
-  private val phy = Module(new S7Lpddr4PhyIo(config))
+  private val phy: S7Lpddr4PhyIo = family match {
+    case "A7" => Module(new A7Lpddr4PhyIo(config))
+    case "K7" => Module(new K7Lpddr4PhyIo(config,
+      dqsOutputDelayInitialValue = 11))
+    case "V7" => Module(new V7Lpddr4PhyIo(config,
+      dqsOutputDelayInitialValue = 11))
+  }
   phy.io.reset := reset.asBool
   phy.io.controllerClock := controllerClockLevel.asClock
   phy.io.doubleRateClock := clock
@@ -108,6 +118,12 @@ class S7Lpddr4PhyIoHarness extends Module {
   phy.io.dqInputDelayIncrement := false.B
   phy.io.dqsInputDelayReset := false.B
   phy.io.dqsInputDelayIncrement := false.B
+  phy.io.commandOutputDelayReset := false.B
+  phy.io.commandOutputDelayIncrement := false.B
+  phy.io.dataOutputDelayReset := false.B
+  phy.io.dataOutputDelayIncrement := false.B
+  phy.io.dqsOutputDelayReset := false.B
+  phy.io.dqsOutputDelayIncrement := false.B
   phy.io.parallel.clock := "h5555".U
   phy.io.parallel.clockEnable := 0.U
   phy.io.parallel.onDieTermination := 0.U
@@ -127,6 +143,9 @@ class S7Lpddr4PhyIoHarness extends Module {
   io.ca0Pad := phy.io.pads.ca(0)
   io.dqDelayValue := phy.io.dqDelayValue(0)
   io.dqsDelayValue := phy.io.dqsDelayValue(0)
+  io.dqOutputDelayValue := phy.io.dqOutputDelayValue(0)
+  io.dmiOutputDelayValue := phy.io.dmiOutputDelayValue(0)
+  io.dqsOutputDelayValue := phy.io.dqsOutputDelayValue(0)
   attach(io.clockPositive, phy.io.pads.clockPositive)
   attach(io.clockNegative, phy.io.pads.clockNegative)
   for (bit <- 0 until 8) attach(io.dq(bit), phy.io.pads.dq(bit))
@@ -251,11 +270,31 @@ class S7Lpddr4PhyIoSpec extends AnyFlatSpec with ChiselScalatestTester {
       dut.io.ca0Pad.expect(true.B)
       dut.io.dqDelayValue.expect(0.U)
       dut.io.dqsDelayValue.expect(0.U)
+      dut.io.dqOutputDelayValue.expect(0.U)
+      dut.io.dmiOutputDelayValue.expect(0.U)
+      dut.io.dqsOutputDelayValue.expect(0.U)
     }
   }
 
-  it should "parse the complete LPDDR4 Xilinx primitive branch" in {
-    test(new S7Lpddr4PhyIoHarness).withAnnotations(Seq(
+  it should "model the Kintex-7 output-delay groups and initial DQS tap" in {
+    test(new S7Lpddr4PhyIoHarness("K7")).withAnnotations(verilator) { dut =>
+      dut.io.resetN.poke("hff".U)
+      dut.io.cs.poke("hff".U)
+      dut.io.ca0.poke("hff".U)
+      dut.clock.step(3)
+      dut.io.resetNPad.expect(true.B)
+      dut.io.csPad.expect(true.B)
+      dut.io.ca0Pad.expect(true.B)
+      dut.io.dqDelayValue.expect(0.U)
+      dut.io.dqsDelayValue.expect(0.U)
+      dut.io.dqOutputDelayValue.expect(0.U)
+      dut.io.dmiOutputDelayValue.expect(0.U)
+      dut.io.dqsOutputDelayValue.expect(11.U)
+    }
+  }
+
+  it should "parse the Virtex-7 LPDDR4 Xilinx primitive branch" in {
+    test(new S7Lpddr4PhyIoHarness("V7")).withAnnotations(Seq(
       VerilatorBackendAnnotation,
       VerilatorFlags(Seq("-DSYNTHESIS", "-Wno-MODMISSING")),
       VerilatorCFlags(Seq("-DWData=IData")))) { dut =>

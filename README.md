@@ -161,10 +161,12 @@ assembly supports both WCK:CK ratios by expanding 4-edge streams to the common
 an externally shifted clock for RDQS on Artix-7. Kintex-7 and Virtex-7 variants
 route CK/CA/WCK and DQ/DMI through separately controlled ODELAY groups and use
 an independently calibrated differential ODELAY+IDELAY RDQS lane. A
-phase-aligned LPDDR4 16:8 gearbox maps
-the portable 16-edge boundary onto the same primitives, reconstructs input
-halves with the reference two-cycle latency, and uses an external sys8x_90 DQS
-clock. Both LPDDR pad assemblies reproduce LiteDRAM's data/DQS output-enable
+phase-aligned LPDDR4 16:8 gearbox maps the portable 16-edge boundary onto the
+same primitives and reconstructs input halves with the reference two-cycle
+latency. Its Artix-7 variant uses an external sys8x_90 DQS clock; Kintex-7 and
+Virtex-7 variants instead place CK/command, DQ/DMI, and DQS in independently
+controlled ODELAY groups while retaining separate DQ/DQS IDELAY calibration.
+Both LPDDR pad assemblies reproduce LiteDRAM's data/DQS output-enable
 pipelines. The RPC assembly exposes the distinct clock, command/write-data,
 read-data, and DQS clock phases and registers tristate control across the two
 relevant domains. Tests compile portable and synthesis branches with Verilator.
