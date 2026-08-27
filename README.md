@@ -215,6 +215,15 @@ Requirements: JDK 11+ and sbt 2.0.6 (the project launcher version).
 sbt test
 ```
 
+With Migen and Verilator installed, the live differential timing regression
+generates Verilog from the pinned LiteDRAM checkout and compares randomized
+`tXXD`/`tFAW` traces cycle by cycle. The launcher discovers an interpreter that
+can import Migen and does not override `PYTHONPATH`:
+
+```sh
+python3 scripts/run_python_differential.py
+```
+
 The tests verify row-miss command generation, write/readback through the
 internal model, a row conflict's `PRECHARGE` then `ACTIVATE` ordering, and
 periodic refresh generation.

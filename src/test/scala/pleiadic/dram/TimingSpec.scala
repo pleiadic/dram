@@ -49,6 +49,23 @@ class TimingSpec extends AnyFlatSpec with ChiselScalatestTester {
     checkTfaw("_-_-____-_-______", "-----------------")
   }
 
+  it should "retain the reference count width for full power-of-two windows" in {
+    test(new TfawController(4)) { dut =>
+      dut.io.valid.poke(true.B)
+      Seq(true, true, true, false, true).foreach { ready =>
+        dut.clock.step()
+        dut.io.ready.expect(ready.B)
+      }
+    }
+    test(new TfawController(8)) { dut =>
+      dut.io.valid.poke(true.B)
+      Seq(true, true, true, false, false, false, false, false, true).foreach { ready =>
+        dut.clock.step()
+        dut.io.ready.expect(ready.B)
+      }
+    }
+  }
+
   behavior of "common PHY helpers"
 
   it should "delay values through every tap" in {

@@ -46,7 +46,10 @@ class TfawController(windowCycles: Int) extends Module {
 
   private val window = RegInit(0.U(windowCycles.W))
   private val ready = RegInit(true.B)
-  private val count = PopCount(window)
+  // LiteDRAM declares count as Signal(max=max(tfaw, 2)); retain that exact
+  // width, including the wrap when a power-of-two window is completely full.
+  private val countWidth = log2Ceil(windowCycles max 2)
+  private val count = PopCount(window)(countWidth - 1, 0)
 
   if (windowCycles == 1) {
     window := io.valid
