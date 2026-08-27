@@ -135,10 +135,12 @@ both memory-clock edges, transposes rising/falling DQ and DM data, applies the
 DDR4 ACT command mux and active-low DM polarity, generates DQS/write-enable
 windows, supports per-byte read/write bitslip and write leveling, and maps
 deserialized DQ back into all four DFI read phases. Family-specific delay and
-I/O cells remain in the outer pad assembly. The Artix-7 assembly supplies the
-8:1 OSERDESE2/ISERDESE2, IOBUF/IOBUFDS, per-byte IDELAY control, and externally
-phase-shifted DQS clock; DDR4's combined bank vector is split into BA/BG by the
-board-level pin mapping.
+I/O cells remain in the outer pad assembly. The 7-series assembly supplies the
+8:1 OSERDESE2/ISERDESE2, IOBUF/IOBUFDS, and per-byte IDELAY control. Artix-7
+uses an externally phase-shifted DQS clock; Kintex-7 and Virtex-7 use the
+OSERDES feedback path and independently controlled ODELAYE2 cells for commands,
+DQ/DM, and DQS. DDR4's combined bank vector is split into BA/BG by board-level
+pin mapping.
 
 A common simulation SerDes boundary converts these portable parallel PHY
 signals to explicit serial input/output/enable pads. It supports back-to-back

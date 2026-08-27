@@ -37,6 +37,7 @@ class S7OutputSerdes(dataWidth: Int = 8, dataRate: String = "DDR") extends
     val data = Input(UInt(8.W))
     val outputEnable = Input(Bool())
     val serial = Output(Bool())
+    val feedback = Output(Bool())
     val tristate = Output(Bool())
   })
 
@@ -51,6 +52,7 @@ class S7OutputSerdes(dataWidth: Int = 8, dataRate: String = "DDR") extends
       |  input  wire [7:0] data,
       |  input  wire       outputEnable,
       |  output wire       serial,
+      |  output wire       feedback,
       |  output wire       tristate
       |);
       |`ifdef SYNTHESIS
@@ -61,7 +63,7 @@ class S7OutputSerdes(dataWidth: Int = 8, dataRate: String = "DDR") extends
       |    .DATA_RATE_TQ("BUF"),
       |    .TRISTATE_WIDTH(1)
       |  ) u_primitive (
-      |    .OQ(serial), .TQ(tristate), .OFB(), .TFB(),
+      |    .OQ(serial), .TQ(tristate), .OFB(feedback), .TFB(),
       |    .SHIFTOUT1(), .SHIFTOUT2(),
       |    .CLK(serialClock), .CLKDIV(dividedClock), .RST(reset),
       |    .OCE(1'b1), .TCE(1'b1),
@@ -73,6 +75,7 @@ class S7OutputSerdes(dataWidth: Int = 8, dataRate: String = "DDR") extends
       |  );
       |`else
       |  assign serial = data[0];
+      |  assign feedback = data[0];
       |  assign tristate = ~outputEnable;
       |`endif
       |endmodule
@@ -409,6 +412,128 @@ class S7DifferentialOutputSerdesIoLane extends RawModule {
   buffer.io.tristate := serializer.io.tristate
   attach(buffer.io.padPositive, io.padPositive)
   attach(buffer.io.padNegative, io.padNegative)
+}
+
+/** OSERDESE2 feedback path followed by a variable ODELAYE2. */
+class S7DelayedOutputSerdes(refClockFrequencyMHz: Int = 200,
+    initialValue: Int = 0) extends RawModule {
+  val io = IO(new Bundle {
+    val reset = Input(Bool())
+    val serialClock = Input(Clock())
+    val dividedClock = Input(Clock())
+    val delayClock = Input(Clock())
+    val delayReset = Input(Bool())
+    val delayIncrement = Input(Bool())
+    val parallelOut = Input(UInt(8.W))
+    val outputEnable = Input(Bool())
+    val serial = Output(Bool())
+    val tristate = Output(Bool())
+    val delayValue = Output(UInt(5.W))
+  })
+
+  private val serializer = Module(new S7OutputSerdes(8, "DDR"))
+  private val delay = Module(new S7OutputDelay(refClockFrequencyMHz, initialValue))
+  serializer.io.reset := io.reset
+  serializer.io.serialClock := io.serialClock
+  serializer.io.dividedClock := io.dividedClock
+  serializer.io.data := io.parallelOut
+  serializer.io.outputEnable := io.outputEnable
+  delay.io.clock := io.delayClock
+  delay.io.reset := io.delayReset
+  delay.io.increment := io.delayIncrement
+  delay.io.dataIn := serializer.io.feedback
+  io.serial := delay.io.dataOut
+  io.tristate := serializer.io.tristate
+  io.delayValue := delay.io.value
+}
+
+/** Bidirectional lane with independent variable output and input delays. */
+class S7DelayedBidirectionalSerdesLane(refClockFrequencyMHz: Int = 200,
+    outputInitialValue: Int = 0) extends RawModule {
+  val io = IO(new Bundle {
+    val reset = Input(Bool())
+    val outputSerialClock = Input(Clock())
+    val inputSerialClock = Input(Clock())
+    val invertedInputSerialClock = Input(Clock())
+    val dividedClock = Input(Clock())
+    val delayClock = Input(Clock())
+    val inputDelayReset = Input(Bool())
+    val inputDelayIncrement = Input(Bool())
+    val outputDelayReset = Input(Bool())
+    val outputDelayIncrement = Input(Bool())
+    val bitslip = Input(Bool())
+    val parallelOut = Input(UInt(8.W))
+    val outputEnable = Input(Bool())
+    val parallelIn = Output(UInt(8.W))
+    val inputDelayValue = Output(UInt(5.W))
+    val outputDelayValue = Output(UInt(5.W))
+    val pad = Analog(1.W)
+  })
+
+  private val output = Module(new S7DelayedOutputSerdes(refClockFrequencyMHz,
+    outputInitialValue))
+  private val buffer = Module(new S7IoBuffer)
+  private val inputDelay = Module(new S7InputDelay(refClockFrequencyMHz))
+  private val input = Module(new S7InputSerdes(8, "DDR"))
+  output.io.reset := io.reset
+  output.io.serialClock := io.outputSerialClock
+  output.io.dividedClock := io.dividedClock
+  output.io.delayClock := io.delayClock
+  output.io.delayReset := io.outputDelayReset
+  output.io.delayIncrement := io.outputDelayIncrement
+  output.io.parallelOut := io.parallelOut
+  output.io.outputEnable := io.outputEnable
+  buffer.io.outputData := output.io.serial
+  buffer.io.tristate := output.io.tristate
+  attach(buffer.io.pad, io.pad)
+  inputDelay.io.clock := io.delayClock
+  inputDelay.io.reset := io.inputDelayReset
+  inputDelay.io.increment := io.inputDelayIncrement
+  inputDelay.io.dataIn := buffer.io.inputData
+  input.io.reset := io.reset
+  input.io.serialClock := io.inputSerialClock
+  input.io.invertedSerialClock := io.invertedInputSerialClock
+  input.io.dividedClock := io.dividedClock
+  input.io.serial := inputDelay.io.dataOut
+  input.io.bitslip := io.bitslip
+  io.parallelIn := input.io.data
+  io.inputDelayValue := inputDelay.io.value
+  io.outputDelayValue := output.io.delayValue
+}
+
+/** Differential output/tristate lane with variable ODELAYE2. */
+class S7DelayedDifferentialOutputSerdesIoLane(refClockFrequencyMHz: Int = 200,
+    outputInitialValue: Int = 0) extends RawModule {
+  val io = IO(new Bundle {
+    val reset = Input(Bool())
+    val serialClock = Input(Clock())
+    val dividedClock = Input(Clock())
+    val delayClock = Input(Clock())
+    val delayReset = Input(Bool())
+    val delayIncrement = Input(Bool())
+    val parallelOut = Input(UInt(8.W))
+    val outputEnable = Input(Bool())
+    val delayValue = Output(UInt(5.W))
+    val padPositive = Analog(1.W)
+    val padNegative = Analog(1.W)
+  })
+
+  private val output = Module(new S7DelayedOutputSerdes(refClockFrequencyMHz,
+    outputInitialValue))
+  private val buffer = Module(new S7DifferentialIoBuffer)
+  output.io.reset := io.reset
+  output.io.serialClock := io.serialClock
+  output.io.dividedClock := io.dividedClock
+  output.io.delayClock := io.delayClock
+  output.io.delayReset := io.delayReset
+  output.io.delayIncrement := io.delayIncrement
+  output.io.parallelOut := io.parallelOut
+  output.io.outputEnable := io.outputEnable
+  buffer.io.outputData := output.io.serial
+  buffer.io.tristate := output.io.tristate
+  attach(buffer.io.padPositive, io.padPositive)
+  attach(buffer.io.padNegative, io.padNegative)
+  io.delayValue := output.io.delayValue
 }
 
 /**

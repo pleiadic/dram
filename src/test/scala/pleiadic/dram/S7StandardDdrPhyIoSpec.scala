@@ -7,7 +7,8 @@ import chiseltest.simulator.{VerilatorBackendAnnotation, VerilatorCFlags, Verila
 import org.scalatest.flatspec.AnyFlatSpec
 import scala.language.reflectiveCalls
 
-class S7StandardDdrPhyIoHarness(memType: String) extends Module {
+class S7StandardDdrPhyIoHarness(memType: String, withOutputDelay: Boolean = false)
+    extends Module {
   private val config = DramConfig(addressBits = 40, dataBits = 64,
     bankBits = (if (memType == "DDR4") 4 else 3),
     rowBits = (if (memType == "DDR4") 17 else 15), columnBits = 10,
@@ -21,6 +22,8 @@ class S7StandardDdrPhyIoHarness(memType: String) extends Module {
     val chipSelectNPad = Output(Bool())
     val activateNPad = Output(Bool())
     val dqDelayValue = Output(UInt(5.W))
+    val dqOutputDelayValue = Output(UInt(5.W))
+    val dqsOutputDelayValue = Output(UInt(5.W))
     val clockPositive = Analog(1.W)
     val clockNegative = Analog(1.W)
     val dq = Vec(8, Analog(1.W))
@@ -28,7 +31,8 @@ class S7StandardDdrPhyIoHarness(memType: String) extends Module {
     val dqsNegative = Analog(1.W)
   })
 
-  private val phy = Module(new S7StandardDdrPhyIo(config))
+  private val phy = Module(new S7StandardDdrPhyIo(config,
+    withOutputDelay = withOutputDelay, dqsOutputDelayInitialValue = 7))
   phy.io.reset := reset.asBool
   phy.io.dividedClock := clock
   phy.io.serialClock := clock
@@ -38,6 +42,12 @@ class S7StandardDdrPhyIoHarness(memType: String) extends Module {
   phy.io.delaySelect := 0.U
   phy.io.dqInputDelayReset := false.B
   phy.io.dqInputDelayIncrement := false.B
+  phy.io.commandOutputDelayReset := false.B
+  phy.io.commandOutputDelayIncrement := false.B
+  phy.io.dqOutputDelayReset := false.B
+  phy.io.dqOutputDelayIncrement := false.B
+  phy.io.dqsOutputDelayReset := false.B
+  phy.io.dqsOutputDelayIncrement := false.B
   phy.io.parallel.clock := "haa".U
   for (bit <- 0 until addressBits) {
     phy.io.parallel.address(bit) := (if (bit == 0) io.address0 else 0.U)
@@ -61,6 +71,8 @@ class S7StandardDdrPhyIoHarness(memType: String) extends Module {
   io.chipSelectNPad := phy.io.pads.chipSelectN(0)
   io.activateNPad := phy.io.pads.activateN
   io.dqDelayValue := phy.io.dqDelayValue(0)
+  io.dqOutputDelayValue := phy.io.dqOutputDelayValue(0)
+  io.dqsOutputDelayValue := phy.io.dqsOutputDelayValue(0)
   attach(io.clockPositive, phy.io.pads.clockPositive)
   attach(io.clockNegative, phy.io.pads.clockNegative)
   for (bit <- 0 until 8) attach(io.dq(bit), phy.io.pads.dq(bit))
@@ -81,12 +93,29 @@ class S7StandardDdrPhyIoSpec extends AnyFlatSpec with ChiselScalatestTester {
       dut.io.chipSelectNPad.expect(false.B)
       dut.io.activateNPad.expect(true.B)
       dut.io.dqDelayValue.expect(0.U)
+      dut.io.dqOutputDelayValue.expect(0.U)
+      dut.io.dqsOutputDelayValue.expect(0.U)
+      dut.clock.step(2)
+    }
+  }
+
+  it should "model the Kintex/Virtex output-delay path" in {
+    test(new S7StandardDdrPhyIoHarness("DDR3", withOutputDelay = true))
+      .withAnnotations(Seq(VerilatorBackendAnnotation,
+        VerilatorCFlags(Seq("-DWData=IData")))) { dut =>
+      dut.io.address0.poke("h01".U)
+      dut.io.chipSelectN.poke("hfe".U)
+      dut.io.activateN.poke("hff".U)
+      dut.io.address0Pad.expect(true.B)
+      dut.io.dqDelayValue.expect(0.U)
+      dut.io.dqOutputDelayValue.expect(0.U)
+      dut.io.dqsOutputDelayValue.expect(7.U)
       dut.clock.step(2)
     }
   }
 
   it should "parse the DDR4 pad assembly with real Xilinx primitive branches" in {
-    test(new S7StandardDdrPhyIoHarness("DDR4")).withAnnotations(Seq(
+    test(new S7StandardDdrPhyIoHarness("DDR4", withOutputDelay = true)).withAnnotations(Seq(
       VerilatorBackendAnnotation,
       VerilatorFlags(Seq("-DSYNTHESIS", "-Wno-MODMISSING")),
       VerilatorCFlags(Seq("-DWData=IData")))) { dut =>
