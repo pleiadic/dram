@@ -14,7 +14,7 @@ class InterfaceSpec extends AnyFlatSpec with ChiselScalatestTester {
       columnBits = 10, nranks = 2)
     val phy = DramPhyConfig(memType = "DDR3", nPhases = 2,
       phyDataBits = 64, padDataBits = 8, burstLength = 8,
-      readLatency = 6, writeLatency = 2)
+      readLatency = 6, writeLatency = 2, readPhase = 0, writePhase = 1)
     val controller = DramControllerConfig(
       timing = DramTiming(tZqcs = Some(8)), withAutoPrecharge = true,
       addressMapping = DramAddressMapping.BankRowColumn,
@@ -35,6 +35,8 @@ class InterfaceSpec extends AnyFlatSpec with ChiselScalatestTester {
     assertThrows[IllegalArgumentException](DramNativeConfig(dataBits = 12))
     assertThrows[IllegalArgumentException](DramGeometryConfig(nranks = 3))
     assertThrows[IllegalArgumentException](DramPhyConfig(memType = "GDDR6"))
+    assertThrows[IllegalArgumentException](DramPhyConfig(nPhases = 2, readPhase = 2))
+    assertThrows[IllegalArgumentException](DramPhyConfig(nPhases = 2, writePhase = -1))
     assertThrows[IllegalArgumentException](DramControllerConfig(refreshPostponing = 9))
     assertThrows[IllegalArgumentException](DramConfig.fromLayers(
       DramNativeConfig(addressBits = 32, dataBits = 64),

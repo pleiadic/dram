@@ -60,11 +60,14 @@ case class DramGeometryConfig(bankBits: Int = 2, rowBits: Int = 10,
 /** DFI/PHY rate and width contract. Zero widths inherit from the enclosing config. */
 case class DramPhyConfig(memType: String = "SDR", nPhases: Int = 1,
     phyDataBits: Int = 0, padDataBits: Int = 0, burstLength: Int = 1,
-    readLatency: Int = 1, writeLatency: Int = 0) {
+    readLatency: Int = 1, writeLatency: Int = 0,
+    readPhase: Int = 0, writePhase: Int = 0) {
   require(DramPhyConfig.supportedMemoryTypes.contains(memType))
   require(nPhases > 0 && phyDataBits >= 0 && padDataBits >= 0)
   require(burstLength > 0 && (burstLength & (burstLength - 1)) == 0)
   require(readLatency >= 1 && writeLatency >= 0)
+  require(readPhase >= 0 && readPhase < nPhases)
+  require(writePhase >= 0 && writePhase < nPhases)
 }
 
 object DramPhyConfig {
@@ -114,13 +117,17 @@ case class DramConfig(
   // Optional controller-cycle period for automatic ZQ short calibration.
   // LiteDRAM derives this from clk_freq/zqcs_freq; keeping cycles here avoids
   // embedding a clock-frequency unit in the synthesizable configuration.
-  zqCalibrationPeriodCycles: Option[Int] = None
+  zqCalibrationPeriodCycles: Option[Int] = None,
+  // DFI phases carrying read/write column commands and data enables. The row
+  // command phase is the preceding phase modulo nPhases, as in LiteDRAM.
+  readPhase: Int = 0,
+  writePhase: Int = 0
 ) {
   val native: DramNativeConfig = DramNativeConfig(addressBits, dataBits)
   val geometry: DramGeometryConfig =
     DramGeometryConfig(bankBits, rowBits, columnBits, nranks)
   val phy: DramPhyConfig = DramPhyConfig(memType, nPhases, phyDataBits,
-    padDataBits, burstLength, readLatency, writeLatency)
+    padDataBits, burstLength, readLatency, writeLatency, readPhase, writePhase)
   val controller: DramControllerConfig = DramControllerConfig(timing,
     withAutoPrecharge, addressMapping, refreshPostponing, cmdBufferDepth,
     readTime, writeTime, zqCalibrationPeriodCycles)
@@ -135,6 +142,8 @@ case class DramConfig(
   require(refreshPostponing >= 1 && refreshPostponing <= 8)
   require(cmdBufferDepth >= 1 && readTime >= 0 && writeTime >= 0)
   require(readLatency >= 1 && writeLatency >= 0)
+  require(readPhase >= 0 && readPhase < nPhases)
+  require(writePhase >= 0 && writePhase < nPhases)
   require(zqCalibrationPeriodCycles.forall(_ >= 1))
   require(zqCalibrationPeriodCycles.isEmpty || timing.tZqcs.nonEmpty,
     "automatic ZQ calibration requires timing.tZqcs")
@@ -177,7 +186,9 @@ object DramConfig {
       readLatency = phy.readLatency,
       writeLatency = phy.writeLatency,
       padDataBits = phy.padDataBits,
-      zqCalibrationPeriodCycles = controller.zqCalibrationPeriodCycles)
+      zqCalibrationPeriodCycles = controller.zqCalibrationPeriodCycles,
+      readPhase = phy.readPhase,
+      writePhase = phy.writePhase)
 }
 
 class DramRequest(config: DramConfig) extends Bundle {

@@ -88,7 +88,8 @@ class Multiplexer(config: DramConfig, bankCount: Int) extends Module {
   private val trrd = Module(new TxxdController(config.timing.tRrd))
   private val tfaw = Module(new TfawController(config.timing.tFaw))
   private val tccd = Module(new TxxdController(config.timing.tCcd))
-  private val twtr = Module(new TxxdController(config.timing.tWtr + config.writeLatency))
+  private val twtr = Module(new TxxdController(
+    config.timing.tWtr + config.writeLatency + config.timing.tCcd))
 
   private val sRead :: sReadToWrite :: sWrite :: sWriteToRead :: sRefresh :: Nil = Enum(5)
   private val state = RegInit(sRead)
@@ -139,8 +140,13 @@ class Multiplexer(config: DramConfig, bankCount: Int) extends Module {
     is(sRead) {
       when(io.refreshMode) { state := sRefresh }
         .elsewhen(writeAvailable && (!readAvailable || serviceTimer === 0.U)) {
-          turnaround := (config.readLatency - 1).U
-          state := sReadToWrite
+          if (config.readLatency == 1) {
+            serviceTimer := (config.writeTime max 1).U - 1.U
+            state := sWrite
+          } else {
+            turnaround := (config.readLatency - 1).U
+            state := sReadToWrite
+          }
         }
       if (config.readTime > 0) {
         when(serviceTimer === 0.U) { serviceTimer := (config.readTime - 1).U }
@@ -149,7 +155,7 @@ class Multiplexer(config: DramConfig, bankCount: Int) extends Module {
     }
     is(sReadToWrite) {
       when(io.refreshMode) { state := sRefresh }
-        .elsewhen(turnaround === 0.U) {
+        .elsewhen(turnaround <= 1.U) {
           serviceTimer := (config.writeTime max 1).U - 1.U
           state := sWrite
         }.otherwise { turnaround := turnaround - 1.U }

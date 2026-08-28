@@ -91,4 +91,22 @@ class MultiplexerSpec extends AnyFlatSpec with ChiselScalatestTester {
       dut.io.bankCommands(0).ready.expect(false.B)
     }
   }
+
+  it should "enter write service after exactly the configured read latency" in {
+    for (latency <- Seq(1, 2, 5)) {
+      test(new Multiplexer(cfg.copy(readLatency = latency), 1)) { dut =>
+        dut.io.command.ready.poke(true.B)
+        dut.io.refreshMode.poke(false.B)
+        dut.io.refreshCommand.valid.poke(false.B)
+        pokeCommand(dut.io.bankCommands(0), DramCommandType.write, 0)
+        var elapsed = 0
+        while (!dut.io.servingWrites.peek().litToBoolean && elapsed < 10) {
+          dut.clock.step()
+          elapsed += 1
+        }
+        assert(elapsed == latency,
+          s"readLatency=$latency entered WRITE after $elapsed cycles")
+      }
+    }
+  }
 }
