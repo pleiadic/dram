@@ -79,13 +79,14 @@ Verilator 5.050 or newer; the define is scoped to the test C++ harness and does
 not alter generated RTL.
 
 Functional frontends now also include ordered Native DMA reader/writer engines,
-an equal-width DRAM-backed ring FIFO, incremental/PRBS BIST generation and
-checking, LiteX-compatible per-lane SEC-DED codecs, saturating ECC status
-counters, and a fixed-window bandwidth monitor. Their remaining control-plane,
-bypass, and stream-width variants are tracked in P8. The integrated ECC Native
-wrapper preserves logical command addresses, pads each 32-bit SEC-DED lane to
-40 storage bits, buffers both datapath directions, supports error injection and
-status accounting, and can perform partial-write RMW before encoding.
+an equal-width DRAM-backed ring FIFO, incremental/PRBS and fixed-table BIST
+generation/checking, LiteX-compatible per-lane SEC-DED codecs, saturating ECC
+status counters, and a fixed-window bandwidth monitor. Their remaining
+control-plane, bypass, and stream-width variants are tracked in P8. The
+integrated ECC Native wrapper preserves logical command addresses, pads each
+32-bit SEC-DED lane to 40 storage bits, buffers both datapath directions,
+supports error injection and status accounting, and can perform partial-write
+RMW before encoding.
 
 The DFI layer exposes the standard DDR4 `act_n` signal and includes a DDR4
 command mux, a hardware/external/software injector with per-phase read-data

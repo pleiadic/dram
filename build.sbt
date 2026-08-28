@@ -14,3 +14,9 @@ addCompilerPlugin(
 )
 
 scalacOptions ++= Seq("-deprecation", "-feature", "-unchecked")
+
+// ChiselTest's in-process JNA backends load generated simulators by top name.
+// Running suites concurrently can therefore bind a test to another suite's
+// shared library on macOS. Keep the full hardware regression deterministic.
+Test / parallelExecution := false
+Test / fork := true

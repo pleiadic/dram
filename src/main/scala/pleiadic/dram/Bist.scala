@@ -201,3 +201,146 @@ class LiteDramBistChecker(config: DramConfig, fifoDepth: Int = 16) extends Modul
     }
   }
 }
+
+/** Writes a compile-time table of Native word addresses and data values. */
+class LiteDramPatternGenerator(config: DramConfig,
+    pattern: Seq[(BigInt, BigInt)], fifoDepth: Int = 16) extends Module {
+  require(pattern.nonEmpty, "BIST pattern must contain at least one entry")
+  private val addressWidth = config.addressBits - config.byteOffsetBits
+  private val addressLimit = BigInt(1) << addressWidth
+  private val dataLimit = BigInt(1) << config.dataBits
+  require(pattern.forall { case (address, data) =>
+    address >= 0 && address < addressLimit && data >= 0 && data < dataLimit
+  }, "BIST pattern entries must fit the Native address and data widths")
+  private val indexWidth = log2Ceil(pattern.length.max(2))
+
+  val io = IO(new Bundle {
+    val start = Input(Bool())
+    val cascadeIn = Input(Bool())
+    val cascadeOut = Output(Bool())
+    val done = Output(Bool())
+    val ticks = Output(UInt(32.W))
+    val nativeCommand = Decoupled(new NativeCommand(config))
+    val nativeWriteData = Decoupled(new NativeWriteData(config))
+  })
+
+  private val addresses = VecInit(pattern.map(_._1.U(addressWidth.W)))
+  private val data = VecInit(pattern.map(_._2.U(config.dataBits.W)))
+  private val writer = Module(new LiteDramDmaWriter(config, fifoDepth))
+  private val index = RegInit(0.U(indexWidth.W))
+  private val running = RegInit(false.B)
+  private val draining = RegInit(false.B)
+  private val done = RegInit(false.B)
+  private val ticks = RegInit(0.U(32.W))
+  private val last = index === (pattern.length - 1).U
+
+  writer.io.request.valid := running && io.cascadeIn
+  writer.io.request.bits.address := addresses(index)
+  writer.io.request.bits.data := data(index)
+  writer.io.request.bits.byteEnable := Fill(config.dataBits / 8, 1.U(1.W))
+  writer.io.request.bits.last := last
+  io.nativeCommand <> writer.io.nativeCommand
+  io.nativeWriteData <> writer.io.nativeWriteData
+  io.cascadeOut := writer.io.request.fire || done
+  io.done := done
+  io.ticks := ticks
+
+  when(io.start) {
+    index := 0.U
+    running := true.B
+    draining := false.B
+    done := false.B
+    ticks := 0.U
+  }.otherwise {
+    when(running) { ticks := ticks + 1.U }
+    when(writer.io.request.fire) {
+      when(last) {
+        running := false.B
+        draining := true.B
+      }.otherwise {
+        index := index + 1.U
+      }
+    }
+    when(draining && !writer.io.busy) {
+      draining := false.B
+      done := true.B
+    }
+  }
+}
+
+/** Reads and checks a compile-time table in issue order. */
+class LiteDramPatternChecker(config: DramConfig,
+    pattern: Seq[(BigInt, BigInt)], fifoDepth: Int = 16) extends Module {
+  require(pattern.nonEmpty, "BIST pattern must contain at least one entry")
+  private val addressWidth = config.addressBits - config.byteOffsetBits
+  private val addressLimit = BigInt(1) << addressWidth
+  private val dataLimit = BigInt(1) << config.dataBits
+  require(pattern.forall { case (address, data) =>
+    address >= 0 && address < addressLimit && data >= 0 && data < dataLimit
+  }, "BIST pattern entries must fit the Native address and data widths")
+  private val indexWidth = log2Ceil(pattern.length.max(2))
+
+  val io = IO(new Bundle {
+    val start = Input(Bool())
+    val cascadeIn = Input(Bool())
+    val cascadeOut = Output(Bool())
+    val done = Output(Bool())
+    val ticks = Output(UInt(32.W))
+    val errors = Output(UInt(32.W))
+    val nativeCommand = Decoupled(new NativeCommand(config))
+    val nativeReadData = Flipped(Decoupled(new NativeReadData(config)))
+  })
+
+  private val addresses = VecInit(pattern.map(_._1.U(addressWidth.W)))
+  private val data = VecInit(pattern.map(_._2.U(config.dataBits.W)))
+  private val reader = Module(new LiteDramDmaReader(config, fifoDepth))
+  private val issueIndex = RegInit(0.U(indexWidth.W))
+  private val checkIndex = RegInit(0.U(indexWidth.W))
+  private val allIssued = RegInit(false.B)
+  private val running = RegInit(false.B)
+  private val done = RegInit(false.B)
+  private val ticks = RegInit(0.U(32.W))
+  private val errors = RegInit(0.U(32.W))
+  private val lastIssue = issueIndex === (pattern.length - 1).U
+  private val lastCheck = checkIndex === (pattern.length - 1).U
+
+  reader.io.enable := running
+  reader.io.request.valid := running && !allIssued && io.cascadeIn
+  reader.io.request.bits.address := addresses(issueIndex)
+  reader.io.request.bits.last := lastIssue
+  io.nativeCommand <> reader.io.nativeCommand
+  reader.io.nativeReadData <> io.nativeReadData
+  reader.io.data.ready := running
+  io.cascadeOut := reader.io.request.fire || done
+  io.done := done
+  io.ticks := ticks
+  io.errors := errors
+
+  when(io.start) {
+    issueIndex := 0.U
+    checkIndex := 0.U
+    allIssued := false.B
+    running := true.B
+    done := false.B
+    ticks := 0.U
+    errors := 0.U
+  }.otherwise {
+    when(running) { ticks := ticks + 1.U }
+    when(reader.io.request.fire) {
+      when(lastIssue) {
+        allIssued := true.B
+      }.otherwise {
+        issueIndex := issueIndex + 1.U
+      }
+    }
+    when(reader.io.data.fire) {
+      when(reader.io.data.bits.data =/= data(checkIndex)) { errors := errors + 1.U }
+      when(lastCheck) {
+        running := false.B
+        done := true.B
+      }.otherwise {
+        checkIndex := checkIndex + 1.U
+      }
+    }
+  }
+}
