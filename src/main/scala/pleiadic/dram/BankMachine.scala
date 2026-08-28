@@ -34,10 +34,10 @@ class BankMachine(config: DramConfig, bankIndex: Int) extends Module {
   private val count = RegInit(0.U(countWidth.W))
 
   private def increment(pointer: UInt): UInt =
-    Mux(pointer === (depth - 1).U, 0.U, pointer + 1.U)
+    if (depth == 1) 0.U else Mux(pointer === (depth - 1).U, 0.U, pointer + 1.U)
 
-  private val head = entries(readPointer)
-  private val nextHead = entries(increment(readPointer))
+  private val head = if (depth == 1) entries.head else entries(readPointer)
+  private val nextHead = if (depth == 1) entries.head else entries(increment(readPointer))
   private val headValid = count =/= 0.U
   private val lookaheadValid = count > 1.U
   private val enqueue = io.request.fire
@@ -45,7 +45,8 @@ class BankMachine(config: DramConfig, bankIndex: Int) extends Module {
 
   io.request.ready := count =/= depth.U
   when(enqueue) {
-    entries(writePointer) := io.request.bits
+    if (depth == 1) entries.head := io.request.bits
+    else entries(writePointer) := io.request.bits
     writePointer := increment(writePointer)
   }
   when(dequeue) { readPointer := increment(readPointer) }
@@ -54,8 +55,12 @@ class BankMachine(config: DramConfig, bankIndex: Int) extends Module {
     is("b01".U) { count := count - 1.U }
   }
 
+  // LiteDRAM's local tWTP controller includes the controller-cycle write
+  // latency and the final column-command interval (AL=0).
+  private val writeToPrecharge =
+    config.writeLatency + config.timing.tWr + config.timing.tCcd
   private val maxTiming = Seq(config.timing.tRcd, config.timing.tRp, config.timing.tRas,
-    config.timing.tRc, config.timing.tWr, config.timing.tRtp).max
+    config.timing.tRc, writeToPrecharge, config.timing.tRtp).max
   private val timingWidth = log2Ceil(maxTiming max 2)
   private val delay = RegInit(0.U(timingWidth.W))
   private val rasDelay = RegInit(0.U(timingWidth.W))
@@ -77,10 +82,23 @@ class BankMachine(config: DramConfig, bankIndex: Int) extends Module {
   private val rowHit = rowOpen && openRow === head.row
   private val useAutoPrecharge = config.withAutoPrecharge.B && lookaheadValid && nextHead.row =/= head.row
 
-  io.command.valid := false.B
-  io.command.bits := 0.U.asTypeOf(new DramCommand(config))
-  io.command.bits.rank := rank.U
-  io.command.bits.bank := bank.U
+  // Commands can remain backpressured while the lookahead FIFO or refresh
+  // request changes.  Snapshot the first presented command so the Decoupled
+  // payload remains irrevocable until it is accepted.
+  private val rawCommandValid = WireDefault(false.B)
+  private val rawCommand = WireDefault(0.U.asTypeOf(new DramCommand(config)))
+  private val heldCommandValid = RegInit(false.B)
+  private val heldCommand = Reg(new DramCommand(config))
+  rawCommand.rank := rank.U
+  rawCommand.bank := bank.U
+  io.command.valid := heldCommandValid || rawCommandValid
+  io.command.bits := Mux(heldCommandValid, heldCommand, rawCommand)
+  when(heldCommandValid) {
+    when(io.command.ready) { heldCommandValid := false.B }
+  }.elsewhen(rawCommandValid && !io.command.ready) {
+    heldCommandValid := true.B
+    heldCommand := rawCommand
+  }
   io.completion.valid := false.B
   io.completion.bits.write := false.B
   io.refreshGrant := false.B
@@ -89,30 +107,32 @@ class BankMachine(config: DramConfig, bankIndex: Int) extends Module {
   io.openRow := openRow
 
   private def issue(command: UInt): Unit = {
-    io.command.valid := true.B
-    io.command.bits.command := command
-    io.command.bits.row := head.row
-    io.command.bits.column := head.column
-    io.command.bits.autoPrecharge := false.B
+    rawCommandValid := true.B
+    rawCommand.command := command
+    rawCommand.row := head.row
+    rawCommand.column := head.column
+    rawCommand.autoPrecharge := false.B
   }
 
   switch(state) {
     is(sRegular) {
-      when(io.refreshRequest) {
+      // A command already exposed to the downstream consumer must complete
+      // before refresh can take ownership of the bank.
+      when(io.refreshRequest && !heldCommandValid) {
         state := sRefresh
       }.elsewhen(headValid) {
         when(!rowOpen) { state := sActivate }
           .elsewhen(!rowHit) { state := sPrecharge }
           .otherwise {
             issue(Mux(head.write, DramCommandType.write, DramCommandType.read))
-            io.command.bits.autoPrecharge := useAutoPrecharge
+            rawCommand.autoPrecharge := useAutoPrecharge
             when(io.command.fire) {
               dequeue := true.B
               io.completion.valid := true.B
               io.completion.bits.write := head.write
               prechargeDelay := Mux(head.write,
-                (config.timing.tWr - 1).U, (config.timing.tRtp - 1).U)
-              when(useAutoPrecharge) { state := sAutoPrecharge }
+                (writeToPrecharge - 1).U, (config.timing.tRtp - 1).U)
+              when(io.command.bits.autoPrecharge) { state := sAutoPrecharge }
             }
           }
       }
