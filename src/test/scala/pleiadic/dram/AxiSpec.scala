@@ -4,6 +4,7 @@ import chisel3._
 import chiseltest._
 import chiseltest.simulator.{VerilatorBackendAnnotation, VerilatorCFlags}
 import org.scalatest.flatspec.AnyFlatSpec
+import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 import scala.language.reflectiveCalls
 import scala.util.Random
@@ -68,6 +69,17 @@ class AxiSpec extends AnyFlatSpec with ChiselScalatestTester {
   private def sendW(dut: Axi4ToNative, data: BigInt, last: Boolean): Unit = {
     dut.io.axi.w.bits.data.poke(data.U)
     dut.io.axi.w.bits.strobe.poke("hf".U)
+    dut.io.axi.w.bits.last.poke(last.B)
+    dut.io.axi.w.valid.poke(true.B)
+    while (!dut.io.axi.w.ready.peek().litToBoolean) dut.clock.step()
+    dut.clock.step()
+    dut.io.axi.w.valid.poke(false.B)
+  }
+
+  private def sendW(dut: Axi4ToNative, data: BigInt, strobe: Int,
+      last: Boolean): Unit = {
+    dut.io.axi.w.bits.data.poke(data.U)
+    dut.io.axi.w.bits.strobe.poke(strobe.U)
     dut.io.axi.w.bits.last.poke(last.B)
     dut.io.axi.w.valid.poke(true.B)
     while (!dut.io.axi.w.ready.peek().litToBoolean) dut.clock.step()
@@ -191,6 +203,153 @@ class AxiSpec extends AnyFlatSpec with ChiselScalatestTester {
       }
       dut.io.nativeReadData.valid.poke(false.B)
       dut.io.axi.r.valid.expect(false.B)
+    }
+  }
+
+  it should "complete partial writes through RMW before responding under random backpressure" in {
+    test(new Axi4ToNative(cfg, withReadModifyWrite = true)).withAnnotations(backend) { dut =>
+      case class Write(address: Int, data: BigInt, strobe: Int)
+      case class Read(address: Int)
+
+      defaults(dut)
+      val random = new Random(0x524d57)
+      val nativeMemory = mutable.Map.empty[Int, BigInt]
+      val expectedMemory = mutable.Map.empty[Int, BigInt]
+      for (address <- 0 until 32) {
+        val value = BigInt(32, random)
+        nativeMemory(address) = value
+        expectedMemory(address) = value
+      }
+      val operations: Seq[Any] = Seq(
+        Write(8, BigInt("aabbccdd", 16), 5), Read(8),
+        Write(9, BigInt("10203040", 16), 15), Read(9)) ++
+        Seq.fill(36) {
+          val address = random.nextInt(32)
+          if (random.nextBoolean())
+            Write(address, BigInt(32, random), random.nextInt(16))
+          else Read(address)
+        }
+
+      var pendingWriteAddress = Option.empty[Int]
+      var pendingRead = Option.empty[BigInt]
+      var readPresented = false
+      var stalledCommand = Option.empty[(Boolean, BigInt)]
+      var stalledWrite = Option.empty[(BigInt, BigInt)]
+      val commandTrace = ArrayBuffer.empty[(Boolean, BigInt)]
+
+      def tick(): Unit = {
+        val commandReady = random.nextInt(4) != 0
+        val writeReady = random.nextBoolean()
+        if (pendingRead.nonEmpty && !readPresented && random.nextBoolean())
+          readPresented = true
+        dut.io.nativeCommand.ready.poke(commandReady.B)
+        dut.io.nativeWriteData.ready.poke(writeReady.B)
+        dut.io.nativeReadData.valid.poke(readPresented.B)
+        dut.io.nativeReadData.bits.data.poke(pendingRead.getOrElse(BigInt(0)).U)
+
+        val commandValid = dut.io.nativeCommand.valid.peek().litToBoolean
+        val command = (dut.io.nativeCommand.bits.write.peek().litToBoolean,
+          dut.io.nativeCommand.bits.address.peek().litValue)
+        stalledCommand.foreach { held =>
+          assert(commandValid && command == held,
+            "RMW Native command changed while backpressured")
+        }
+        stalledCommand = if (commandValid && !commandReady) Some(command) else None
+
+        val writeValid = dut.io.nativeWriteData.valid.peek().litToBoolean
+        val write = (dut.io.nativeWriteData.bits.data.peek().litValue,
+          dut.io.nativeWriteData.bits.byteEnable.peek().litValue)
+        stalledWrite.foreach { held =>
+          assert(writeValid && write == held,
+            "RMW Native write data changed while backpressured")
+        }
+        stalledWrite = if (writeValid && !writeReady) Some(write) else None
+
+        if (commandValid && commandReady) {
+          commandTrace += command
+          if (command._1) {
+            assert(pendingWriteAddress.isEmpty)
+            pendingWriteAddress = Some(command._2.toInt)
+          } else {
+            assert(pendingRead.isEmpty)
+            pendingRead = Some(nativeMemory(command._2.toInt))
+            readPresented = false
+          }
+        }
+        if (writeValid && writeReady) {
+          val address = pendingWriteAddress.getOrElse(
+            fail("Native write data arrived without a command"))
+          var value = nativeMemory(address)
+          for (byte <- 0 until 4 if ((write._2 >> byte) & 1) != 0) {
+            val mask = BigInt(0xff) << (8 * byte)
+            value = (value & ~mask) | (write._1 & mask)
+          }
+          nativeMemory(address) = value
+          pendingWriteAddress = None
+        }
+        val readFire = readPresented && dut.io.nativeReadData.ready.peek().litToBoolean
+        dut.clock.step()
+        if (readFire) {
+          pendingRead = None
+          readPresented = false
+        }
+      }
+
+      for ((operation, index) <- operations.zipWithIndex) {
+        commandTrace.clear()
+        dut.io.nativeCommand.ready.poke(false.B)
+        dut.io.nativeWriteData.ready.poke(false.B)
+        operation match {
+          case Write(address, data, strobe) =>
+            sendAw(dut, id = index & 15, address = address * 4, length = 0)
+            sendW(dut, data, strobe, last = true)
+            dut.io.axi.b.ready.poke(false.B)
+            var cycles = 0
+            while (!dut.io.axi.b.valid.peek().litToBoolean && cycles < 200) {
+              tick()
+              cycles += 1
+            }
+            assert(cycles < 200, s"RMW write $index timed out")
+            dut.io.axi.b.bits.id.expect((index & 15).U)
+            dut.io.axi.b.bits.response.expect(AxiResponse.okay)
+
+            var expected = expectedMemory(address)
+            for (byte <- 0 until 4 if ((strobe >> byte) & 1) != 0) {
+              val mask = BigInt(0xff) << (8 * byte)
+              expected = (expected & ~mask) | (data & mask)
+            }
+            expectedMemory(address) = expected
+            assert(nativeMemory(address) == expected)
+            if (strobe == 15)
+              assert(commandTrace.map(_._1) == Seq(true))
+            else
+              assert(commandTrace.map(_._1) == Seq(false, true))
+            assert(commandTrace.forall(_._2 == address))
+
+            dut.io.axi.b.ready.poke(true.B)
+            tick()
+            dut.io.axi.b.ready.poke(false.B)
+
+          case Read(address) =>
+            sendAr(dut, id = index & 15, address = address * 4, length = 0)
+            dut.io.axi.r.ready.poke(false.B)
+            var cycles = 0
+            while (!dut.io.axi.r.valid.peek().litToBoolean && cycles < 200) {
+              tick()
+              cycles += 1
+            }
+            assert(cycles < 200, s"RMW-mode read $index timed out")
+            dut.io.axi.r.bits.id.expect((index & 15).U)
+            dut.io.axi.r.bits.data.expect(expectedMemory(address).U)
+            dut.io.axi.r.bits.last.expect(true.B)
+            assert(commandTrace == Seq(false -> BigInt(address)))
+            dut.io.axi.r.ready.poke(true.B)
+            tick()
+            dut.io.axi.r.ready.poke(false.B)
+        }
+      }
+      assert(pendingWriteAddress.isEmpty && pendingRead.isEmpty)
+      assert(nativeMemory == expectedMemory)
     }
   }
 }

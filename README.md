@@ -57,9 +57,11 @@ The frontend layer currently includes Native up/down width conversion, a
 Gray-pointer asynchronous Native CDC, Wishbone B4 with width conversion,
 burst-capable Avalon-MM, and an AXI4 bridge. The AXI bridge buffers AW/W/AR
 independently, preserves IDs, implements FIXED/INCR/WRAP address generation,
-and never releases write data before a matching Native command. Optional AXI
-sidebands/exclusive accesses and ECC read-modify-write remain compatibility
-work. Narrow Wishbone bursts coalesce writes within a Native word, flush
+and never releases write data before a matching Native command. Its optional
+read-modify-write stage converts partial WSTRB writes into an ordered Native
+read, byte merge, and full-mask write for ECC-capable datapaths. AXI
+sidebands/exclusive accesses remain compatibility work. Narrow Wishbone bursts
+coalesce writes within a Native word, flush
 partial aggregates at burst/cycle boundaries, and reuse cached wide reads;
 random Native-backpressure regressions check the resulting memory image.
 
@@ -75,7 +77,7 @@ Functional frontends now also include ordered Native DMA reader/writer engines,
 an equal-width DRAM-backed ring FIFO, incremental/PRBS BIST generation and
 checking, LiteX-compatible per-lane SEC-DED codecs, saturating ECC status
 counters, and a fixed-window bandwidth monitor. Their remaining control-plane,
-bypass, and read-modify-write variants are tracked in P8.
+bypass, and integrated ECC Native-wrapper variants are tracked in P8.
 
 The DFI layer exposes the standard DDR4 `act_n` signal and includes a DDR4
 command mux, a hardware/external/software injector with per-phase read-data

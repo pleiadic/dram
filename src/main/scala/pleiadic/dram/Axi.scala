@@ -48,6 +48,13 @@ class Axi4SlavePort(addressWidth: Int, dataWidth: Int, idWidth: Int) extends Bun
   val r = Decoupled(new AxiReadData(dataWidth, idWidth))
 }
 
+class Axi4ToNativeIo(config: DramConfig, idWidth: Int) extends Bundle {
+  val axi = new Axi4SlavePort(config.addressBits, config.dataBits, idWidth)
+  val nativeCommand = Decoupled(new NativeCommand(config))
+  val nativeWriteData = Decoupled(new NativeWriteData(config))
+  val nativeReadData = Flipped(Decoupled(new NativeReadData(config)))
+}
+
 private class AxiReadTag(idWidth: Int) extends Bundle {
   val id = UInt(idWidth.W)
   val last = Bool()
@@ -60,7 +67,7 @@ private class AxiReadTag(idWidth: Int) extends Bundle {
   * released only after a matching write command has been accepted. Responses
   * are ordered, always return OKAY, and preserve the AXI transaction ID.
   */
-class Axi4ToNative(
+private class Axi4ToNativeBridge(
     config: DramConfig,
     idWidth: Int = 4,
     maxBurstLength: Int = 256,
@@ -81,12 +88,7 @@ class Axi4ToNative(
   private val reservationWidth = log2Ceil(writeDataQueueDepth + 1).max(1)
   private val fullBeatSize = log2Ceil(config.dataBits / 8)
 
-  val io = IO(new Bundle {
-    val axi = new Axi4SlavePort(addressWidth, config.dataBits, idWidth)
-    val nativeCommand = Decoupled(new NativeCommand(config))
-    val nativeWriteData = Decoupled(new NativeWriteData(config))
-    val nativeReadData = Flipped(Decoupled(new NativeReadData(config)))
-  })
+  val io = IO(new Axi4ToNativeIo(config, idWidth))
 
   private val awQueue = Module(new Queue(new AxiAddress(addressWidth, idWidth), addressQueueDepth))
   private val wQueue = Module(new Queue(new AxiWriteData(config.dataBits), writeDataQueueDepth))
@@ -263,4 +265,42 @@ class Axi4ToNative(
   io.axi.r.bits.last := readTags.io.deq.bits.last
   io.nativeReadData.ready := io.axi.r.ready && readTags.io.deq.valid
   readTags.io.deq.ready := io.axi.r.ready && io.nativeReadData.valid
+}
+
+/**
+  * AXI4 slave to equal-width Native bridge. When `withReadModifyWrite` is set,
+  * partial WSTRB writes are serialized into a Native read/full-mask write
+  * sequence. This mode is suitable in front of ECC datapaths that cannot
+  * update sub-ECC-word byte lanes directly.
+  */
+class Axi4ToNative(
+    config: DramConfig,
+    idWidth: Int = 4,
+    maxBurstLength: Int = 256,
+    addressQueueDepth: Int = 4,
+    writeDataQueueDepth: Int = 16,
+    readOutstanding: Int = 16,
+    baseAddress: BigInt = 0,
+    withReadModifyWrite: Boolean = false
+) extends Module {
+  val io = IO(new Axi4ToNativeIo(config, idWidth))
+
+  private val bridge = Module(new Axi4ToNativeBridge(config, idWidth,
+    maxBurstLength, addressQueueDepth, writeDataQueueDepth, readOutstanding,
+    baseAddress))
+  bridge.io.axi <> io.axi
+
+  if (withReadModifyWrite) {
+    val rmw = Module(new NativeReadModifyWrite(config))
+    rmw.io.inputCommand <> bridge.io.nativeCommand
+    rmw.io.inputWriteData <> bridge.io.nativeWriteData
+    bridge.io.nativeReadData <> rmw.io.outputReadData
+    io.nativeCommand <> rmw.io.outputCommand
+    io.nativeWriteData <> rmw.io.outputWriteData
+    rmw.io.inputReadData <> io.nativeReadData
+  } else {
+    io.nativeCommand <> bridge.io.nativeCommand
+    io.nativeWriteData <> bridge.io.nativeWriteData
+    bridge.io.nativeReadData <> io.nativeReadData
+  }
 }

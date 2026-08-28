@@ -19,6 +19,123 @@ class NativeAdapterReadData(dataWidth: Int) extends Bundle {
 }
 
 /**
+  * Optional single-transaction Native read-modify-write stage. Full writes and
+  * reads pass through unchanged. A partial write is completed as an internal
+  * read followed by a full-mask write, and its upstream write-data handshake
+  * is delayed until that final write has reached the downstream Native port.
+  */
+class NativeReadModifyWrite(config: DramConfig) extends Module {
+  private val nativeAddressWidth = config.addressBits - config.byteOffsetBits
+  private val byteCount = config.dataBits / 8
+
+  val io = IO(new Bundle {
+    val inputCommand = Flipped(Decoupled(new NativeCommand(config)))
+    val inputWriteData = Flipped(Decoupled(new NativeWriteData(config)))
+    val outputReadData = Decoupled(new NativeReadData(config))
+    val outputCommand = Decoupled(new NativeCommand(config))
+    val outputWriteData = Decoupled(new NativeWriteData(config))
+    val inputReadData = Flipped(Decoupled(new NativeReadData(config)))
+  })
+
+  private val Seq(sIdle, sClassifyWrite, sPassWriteCommand, sPassWriteData,
+    sRmwReadCommand, sRmwReadData, sRmwWriteCommand, sRmwWriteData,
+    sPassReadCommand, sPassReadData) = Enum(10)
+  private val state = RegInit(sIdle)
+  private val address = Reg(UInt(nativeAddressWidth.W))
+  private val partialData = Reg(UInt(config.dataBits.W))
+  private val partialByteEnable = Reg(UInt(byteCount.W))
+  private val mergedData = Reg(UInt(config.dataBits.W))
+
+  io.inputCommand.ready := false.B
+  io.inputWriteData.ready := false.B
+  io.outputReadData.valid := false.B
+  io.outputReadData.bits.data := io.inputReadData.bits.data
+  io.outputCommand.valid := false.B
+  io.outputCommand.bits.write := false.B
+  io.outputCommand.bits.address := address
+  io.outputWriteData.valid := false.B
+  io.outputWriteData.bits.data := 0.U
+  io.outputWriteData.bits.byteEnable := 0.U
+  io.inputReadData.ready := false.B
+
+  switch(state) {
+    is(sIdle) {
+      io.inputCommand.ready := true.B
+      when(io.inputCommand.fire) {
+        address := io.inputCommand.bits.address
+        state := Mux(io.inputCommand.bits.write, sClassifyWrite, sPassReadCommand)
+      }
+    }
+    is(sClassifyWrite) {
+      when(io.inputWriteData.valid) {
+        when(io.inputWriteData.bits.byteEnable.andR) {
+          state := sPassWriteCommand
+        }.otherwise {
+          partialData := io.inputWriteData.bits.data
+          partialByteEnable := io.inputWriteData.bits.byteEnable
+          state := sRmwReadCommand
+        }
+      }
+    }
+    is(sPassWriteCommand) {
+      io.outputCommand.valid := true.B
+      io.outputCommand.bits.write := true.B
+      when(io.outputCommand.fire) { state := sPassWriteData }
+    }
+    is(sPassWriteData) {
+      io.outputWriteData.valid := io.inputWriteData.valid
+      io.outputWriteData.bits.data := io.inputWriteData.bits.data
+      io.outputWriteData.bits.byteEnable := io.inputWriteData.bits.byteEnable
+      io.inputWriteData.ready := io.outputWriteData.ready
+      when(io.outputWriteData.fire) { state := sIdle }
+    }
+    is(sRmwReadCommand) {
+      io.outputCommand.valid := true.B
+      io.outputCommand.bits.write := false.B
+      when(io.outputCommand.fire) { state := sRmwReadData }
+    }
+    is(sRmwReadData) {
+      io.inputReadData.ready := true.B
+      when(io.inputReadData.fire) {
+        val byteMask = Cat((0 until byteCount).reverse.map { byte =>
+          Fill(8, partialByteEnable(byte))
+        })
+        mergedData := (io.inputReadData.bits.data & ~byteMask) |
+          (partialData & byteMask)
+        state := sRmwWriteCommand
+      }
+    }
+    is(sRmwWriteCommand) {
+      io.outputCommand.valid := true.B
+      io.outputCommand.bits.write := true.B
+      when(io.outputCommand.fire) { state := sRmwWriteData }
+    }
+    is(sRmwWriteData) {
+      io.outputWriteData.valid := io.inputWriteData.valid
+      io.outputWriteData.bits.data := mergedData
+      io.outputWriteData.bits.byteEnable := Fill(byteCount, 1.U(1.W))
+      io.inputWriteData.ready := io.outputWriteData.ready
+      when(io.inputWriteData.valid) {
+        assert(io.inputWriteData.bits.data === partialData &&
+          io.inputWriteData.bits.byteEnable === partialByteEnable,
+          "Native partial write changed before RMW completion")
+      }
+      when(io.outputWriteData.fire) { state := sIdle }
+    }
+    is(sPassReadCommand) {
+      io.outputCommand.valid := true.B
+      io.outputCommand.bits.write := false.B
+      when(io.outputCommand.fire) { state := sPassReadData }
+    }
+    is(sPassReadData) {
+      io.outputReadData.valid := io.inputReadData.valid
+      io.inputReadData.ready := io.outputReadData.ready
+      when(io.outputReadData.fire) { state := sIdle }
+    }
+  }
+}
+
+/**
   * Splits each wide native transaction into `inputWidth / outputWidth`
   * consecutive narrow transactions and joins narrow read responses.
   */
