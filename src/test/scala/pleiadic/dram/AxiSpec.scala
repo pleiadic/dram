@@ -51,7 +51,9 @@ class AxiSpec extends AnyFlatSpec with ChiselScalatestTester {
   }
 
   private def sendAw(dut: Axi4ToNative, id: Int, address: Int,
-      length: Int, burst: BigInt = 1, lock: Boolean = false): Unit = {
+      length: Int, burst: BigInt = 1, lock: Boolean = false,
+      step: () => Unit = null): Unit = {
+    def advance(): Unit = if (step == null) dut.clock.step() else step()
     dut.io.axi.aw.bits.id.poke(id.U)
     dut.io.axi.aw.bits.address.poke(address.U)
     dut.io.axi.aw.bits.length.poke(length.U)
@@ -59,13 +61,15 @@ class AxiSpec extends AnyFlatSpec with ChiselScalatestTester {
     dut.io.axi.aw.bits.burst.poke(burst.U)
     dut.io.axi.aw.bits.lock.poke(lock.B)
     dut.io.axi.aw.valid.poke(true.B)
-    while (!dut.io.axi.aw.ready.peek().litToBoolean) dut.clock.step()
-    dut.clock.step()
+    while (!dut.io.axi.aw.ready.peek().litToBoolean) advance()
+    advance()
     dut.io.axi.aw.valid.poke(false.B)
   }
 
   private def sendAr(dut: Axi4ToNative, id: Int, address: Int,
-      length: Int, burst: BigInt = 1, lock: Boolean = false): Unit = {
+      length: Int, burst: BigInt = 1, lock: Boolean = false,
+      step: () => Unit = null): Unit = {
+    def advance(): Unit = if (step == null) dut.clock.step() else step()
     dut.io.axi.ar.bits.id.poke(id.U)
     dut.io.axi.ar.bits.address.poke(address.U)
     dut.io.axi.ar.bits.length.poke(length.U)
@@ -73,29 +77,32 @@ class AxiSpec extends AnyFlatSpec with ChiselScalatestTester {
     dut.io.axi.ar.bits.burst.poke(burst.U)
     dut.io.axi.ar.bits.lock.poke(lock.B)
     dut.io.axi.ar.valid.poke(true.B)
-    while (!dut.io.axi.ar.ready.peek().litToBoolean) dut.clock.step()
-    dut.clock.step()
+    while (!dut.io.axi.ar.ready.peek().litToBoolean) advance()
+    advance()
     dut.io.axi.ar.valid.poke(false.B)
   }
 
-  private def sendW(dut: Axi4ToNative, data: BigInt, last: Boolean): Unit = {
+  private def sendW(dut: Axi4ToNative, data: BigInt, last: Boolean,
+      step: () => Unit = null): Unit = {
+    def advance(): Unit = if (step == null) dut.clock.step() else step()
     dut.io.axi.w.bits.data.poke(data.U)
     dut.io.axi.w.bits.strobe.poke("hf".U)
     dut.io.axi.w.bits.last.poke(last.B)
     dut.io.axi.w.valid.poke(true.B)
-    while (!dut.io.axi.w.ready.peek().litToBoolean) dut.clock.step()
-    dut.clock.step()
+    while (!dut.io.axi.w.ready.peek().litToBoolean) advance()
+    advance()
     dut.io.axi.w.valid.poke(false.B)
   }
 
-  private def sendW(dut: Axi4ToNative, data: BigInt, strobe: Int,
-      last: Boolean): Unit = {
+  private def sendWStrobe(dut: Axi4ToNative, data: BigInt, strobe: Int,
+      last: Boolean, step: () => Unit = null): Unit = {
+    def advance(): Unit = if (step == null) dut.clock.step() else step()
     dut.io.axi.w.bits.data.poke(data.U)
     dut.io.axi.w.bits.strobe.poke(strobe.U)
     dut.io.axi.w.bits.last.poke(last.B)
     dut.io.axi.w.valid.poke(true.B)
-    while (!dut.io.axi.w.ready.peek().litToBoolean) dut.clock.step()
-    dut.clock.step()
+    while (!dut.io.axi.w.ready.peek().litToBoolean) advance()
+    advance()
     dut.io.axi.w.valid.poke(false.B)
   }
 
@@ -314,7 +321,7 @@ class AxiSpec extends AnyFlatSpec with ChiselScalatestTester {
         operation match {
           case Write(address, data, strobe) =>
             sendAw(dut, id = index & 15, address = address * 4, length = 0)
-            sendW(dut, data, strobe, last = true)
+            sendWStrobe(dut, data, strobe, last = true)
             dut.io.axi.b.ready.poke(false.B)
             var cycles = 0
             while (!dut.io.axi.b.valid.peek().litToBoolean && cycles < 200) {
@@ -369,6 +376,7 @@ class AxiSpec extends AnyFlatSpec with ChiselScalatestTester {
     test(new Axi4ToNative(cfg)).withAnnotations(backend) { dut =>
       defaults(dut)
       val random = new Random(0x4558434c)
+      val protocol = new Axi4ProtocolChecker(dut)
       val nativeMemory = mutable.Map.empty[Int, BigInt]
       val expectedMemory = mutable.Map.empty[Int, BigInt]
       for (address <- 0 until 32) {
@@ -401,6 +409,8 @@ class AxiSpec extends AnyFlatSpec with ChiselScalatestTester {
         dut.io.nativeWriteData.ready.poke(writeReady.B)
         dut.io.nativeReadData.valid.poke(readPresented.B)
         dut.io.nativeReadData.bits.data.poke(pendingRead.getOrElse(BigInt(0)).U)
+
+        protocol.sample()
 
         val commandValid = dut.io.nativeCommand.valid.peek().litToBoolean
         val command = (dut.io.nativeCommand.bits.write.peek().litToBoolean,
@@ -454,7 +464,8 @@ class AxiSpec extends AnyFlatSpec with ChiselScalatestTester {
         commandTrace.clear()
         dut.io.nativeCommand.ready.poke(false.B)
         randomizeSidebands(write = false)
-        sendAr(dut, id, address * 4, length = 0, lock = exclusive)
+        sendAr(dut, id, address * 4, length = 0, lock = exclusive,
+          step = () => tick())
         dut.io.axi.r.ready.poke(false.B)
         var cycles = 0
         while (!dut.io.axi.r.valid.peek().litToBoolean && cycles < 200) {
@@ -487,8 +498,9 @@ class AxiSpec extends AnyFlatSpec with ChiselScalatestTester {
         dut.io.nativeCommand.ready.poke(false.B)
         dut.io.nativeWriteData.ready.poke(false.B)
         randomizeSidebands(write = true)
-        sendAw(dut, id, address * 4, length = 0, lock = exclusive)
-        sendW(dut, data, last = true)
+        sendAw(dut, id, address * 4, length = 0, lock = exclusive,
+          step = () => tick())
+        sendW(dut, data, last = true, step = () => tick())
         dut.io.axi.b.ready.poke(false.B)
         var cycles = 0
         while (!dut.io.axi.b.valid.peek().litToBoolean && cycles < 200) {
@@ -544,6 +556,7 @@ class AxiSpec extends AnyFlatSpec with ChiselScalatestTester {
         exclusive = true, succeeds = false)
       assert(pendingWriteAddress.isEmpty && pendingRead.isEmpty)
       assert(nativeMemory == expectedMemory)
+      protocol.finish()
     }
   }
 }

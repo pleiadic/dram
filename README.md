@@ -63,9 +63,12 @@ read, byte merge, and full-mask write for ECC-capable datapaths. AXI address
 channels expose LOCK/CACHE/PROT/QOS/REGION sidebands. Per-ID exclusive monitors
 return EXOKAY for successful reservations and drain failed exclusive writes
 without issuing Native traffic. Narrow Wishbone bursts coalesce writes within
-a Native word, flush
-partial aggregates at burst/cycle boundaries, and reuse cached wide reads;
-random Native-backpressure regressions check the resulting memory image.
+a Native word, flush partial aggregates at burst/cycle boundaries, and reuse
+cached wide reads; random Native-backpressure regressions check the resulting
+memory image.
+Independent test-side protocol observers check AXI channel stability, burst
+framing, IDs and response completion, plus Avalon wait-request stability and
+burst response accounting, without relying on bridge-internal state.
 
 The CDC layer provides an attributed multi-stage level synchronizer, a
 toggle-based pulse synchronizer, and a Gray-pointer asynchronous FIFO used by
