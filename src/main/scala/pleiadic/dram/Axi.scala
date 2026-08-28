@@ -12,6 +12,10 @@ object AxiBurst {
 
 object AxiResponse {
   val okay = 0.U(2.W)
+  val exOkay = 1.U(2.W)
+  val exclusiveOkay = exOkay
+  val slaveError = 2.U(2.W)
+  val decodeError = 3.U(2.W)
 }
 
 class AxiAddress(addressWidth: Int, idWidth: Int) extends Bundle {
@@ -20,6 +24,11 @@ class AxiAddress(addressWidth: Int, idWidth: Int) extends Bundle {
   val length = UInt(8.W)
   val size = UInt(3.W)
   val burst = UInt(2.W)
+  val lock = Bool()
+  val cache = UInt(4.W)
+  val prot = UInt(3.W)
+  val qos = UInt(4.W)
+  val region = UInt(4.W)
 }
 
 class AxiWriteData(dataWidth: Int) extends Bundle {
@@ -58,6 +67,7 @@ class Axi4ToNativeIo(config: DramConfig, idWidth: Int) extends Bundle {
 private class AxiReadTag(idWidth: Int) extends Bundle {
   val id = UInt(idWidth.W)
   val last = Bool()
+  val response = UInt(2.W)
 }
 
 /**
@@ -77,6 +87,7 @@ private class Axi4ToNativeBridge(
     baseAddress: BigInt = 0
 ) extends Module {
   require(idWidth >= 1)
+  require(idWidth <= 8, "exclusive monitor table supports at most 256 AXI IDs")
   require(maxBurstLength >= 1 && maxBurstLength <= 256)
   require(addressQueueDepth >= 1 && writeDataQueueDepth >= 1 && readOutstanding >= 1)
   require(baseAddress >= 0 && baseAddress < (BigInt(1) << config.addressBits))
@@ -116,28 +127,55 @@ private class Axi4ToNativeBridge(
   private val writeLength = Reg(UInt(8.W))
   private val writeSize = Reg(UInt(3.W))
   private val writeBurst = Reg(UInt(2.W))
+  private val writeDrop = RegInit(false.B)
+  private val writeResponse = RegInit(AxiResponse.okay)
   private val writeCommandsRemaining = RegInit(0.U(countWidth.W))
   private val writeDataRemaining = RegInit(0.U(countWidth.W))
   private val writeReservations = RegInit(0.U(reservationWidth.W))
 
   private val responseValid = RegInit(false.B)
   private val responseId = Reg(UInt(idWidth.W))
+  private val responseCode = RegInit(AxiResponse.okay)
   io.axi.b.valid := responseValid
   io.axi.b.bits.id := responseId
-  io.axi.b.bits.response := AxiResponse.okay
+  io.axi.b.bits.response := responseCode
   when(io.axi.b.fire) { responseValid := false.B }
+
+  // The monitor table is indexed by AXI ID. A global write epoch provides a
+  // conservative global-exclusive monitor: any completed write invalidates
+  // every older reservation, while each ID retains its own transaction shape.
+  private val monitorCount = 1 << idWidth
+  private val monitorValid = RegInit(VecInit(Seq.fill(monitorCount)(false.B)))
+  private val monitorAddress = Reg(Vec(monitorCount, UInt(addressWidth.W)))
+  private val monitorLength = Reg(Vec(monitorCount, UInt(8.W)))
+  private val monitorSize = Reg(Vec(monitorCount, UInt(3.W)))
+  private val monitorBurst = Reg(Vec(monitorCount, UInt(2.W)))
+  private val writeEpoch = RegInit(0.U(32.W))
+  private val monitorEpoch = Reg(Vec(monitorCount, UInt(32.W)))
 
   awQueue.io.deq.ready := !writeActive && !responseValid
   when(awQueue.io.deq.fire) {
     assert(awQueue.io.deq.bits.address >= baseAddress.U, "AXI write address is below baseAddress")
+    val monitorId = awQueue.io.deq.bits.id
+    val monitorMatches = monitorValid(monitorId) &&
+      monitorAddress(monitorId) === awQueue.io.deq.bits.address &&
+      monitorLength(monitorId) === awQueue.io.deq.bits.length &&
+      monitorSize(monitorId) === awQueue.io.deq.bits.size &&
+      monitorBurst(monitorId) === awQueue.io.deq.bits.burst &&
+      monitorEpoch(monitorId) === writeEpoch
+    val exclusiveSuccess = awQueue.io.deq.bits.lock && monitorMatches
     writeActive := true.B
     writeAddress := awQueue.io.deq.bits.address
     writeId := awQueue.io.deq.bits.id
     writeLength := awQueue.io.deq.bits.length
     writeSize := awQueue.io.deq.bits.size
     writeBurst := awQueue.io.deq.bits.burst
-    writeCommandsRemaining := awQueue.io.deq.bits.length +& 1.U
+    writeDrop := awQueue.io.deq.bits.lock && !monitorMatches
+    writeResponse := Mux(exclusiveSuccess, AxiResponse.exclusiveOkay, AxiResponse.okay)
+    writeCommandsRemaining := Mux(awQueue.io.deq.bits.lock && !monitorMatches,
+      0.U, awQueue.io.deq.bits.length +& 1.U)
     writeDataRemaining := awQueue.io.deq.bits.length +& 1.U
+    when(awQueue.io.deq.bits.lock) { monitorValid(monitorId) := false.B }
   }
 
   private val readActive = RegInit(false.B)
@@ -146,6 +184,7 @@ private class Axi4ToNativeBridge(
   private val readLength = Reg(UInt(8.W))
   private val readSize = Reg(UInt(3.W))
   private val readBurst = Reg(UInt(2.W))
+  private val readExclusive = RegInit(false.B)
   private val readCommandsRemaining = RegInit(0.U(countWidth.W))
 
   arQueue.io.deq.ready := !readActive
@@ -157,7 +196,17 @@ private class Axi4ToNativeBridge(
     readLength := arQueue.io.deq.bits.length
     readSize := arQueue.io.deq.bits.size
     readBurst := arQueue.io.deq.bits.burst
+    readExclusive := arQueue.io.deq.bits.lock
     readCommandsRemaining := arQueue.io.deq.bits.length +& 1.U
+    when(arQueue.io.deq.bits.lock) {
+      val monitorId = arQueue.io.deq.bits.id
+      monitorValid(monitorId) := true.B
+      monitorAddress(monitorId) := arQueue.io.deq.bits.address
+      monitorLength(monitorId) := arQueue.io.deq.bits.length
+      monitorSize(monitorId) := arQueue.io.deq.bits.size
+      monitorBurst(monitorId) := arQueue.io.deq.bits.burst
+      monitorEpoch(monitorId) := writeEpoch
+    }
   }
 
   private def nextBurstAddress(address: UInt, length: UInt, size: UInt, burst: UInt): UInt = {
@@ -231,13 +280,16 @@ private class Axi4ToNativeBridge(
     }
   }
 
-  io.nativeWriteData.valid := writeReservations =/= 0.U && wQueue.io.deq.valid
+  io.nativeWriteData.valid := !writeDrop && writeReservations =/= 0.U && wQueue.io.deq.valid
   io.nativeWriteData.bits.data := wQueue.io.deq.bits.data
   io.nativeWriteData.bits.byteEnable := wQueue.io.deq.bits.strobe
-  wQueue.io.deq.ready := writeReservations =/= 0.U && io.nativeWriteData.ready
-  private val writeDataFire = io.nativeWriteData.fire
+  private val dropWriteData = writeActive && writeDrop && wQueue.io.deq.valid
+  wQueue.io.deq.ready := Mux(writeDrop, writeActive,
+    writeReservations =/= 0.U && io.nativeWriteData.ready)
+  private val nativeWriteDataFire = io.nativeWriteData.fire
+  private val writeDataFire = nativeWriteDataFire || dropWriteData
 
-  switch(Cat(writeCommandFire, writeDataFire)) {
+  switch(Cat(writeCommandFire, nativeWriteDataFire)) {
     is("b10".U) { writeReservations := writeReservations + 1.U }
     is("b01".U) { writeReservations := writeReservations - 1.U }
   }
@@ -251,17 +303,21 @@ private class Axi4ToNativeBridge(
       writeActive := false.B
       responseValid := true.B
       responseId := writeId
+      responseCode := writeResponse
+      when(!writeDrop) { writeEpoch := writeEpoch + 1.U }
     }
   }
 
   readTags.io.enq.valid := readCommandFire
   readTags.io.enq.bits.id := readId
   readTags.io.enq.bits.last := readCommandsRemaining === 1.U
+  readTags.io.enq.bits.response :=
+    Mux(readExclusive, AxiResponse.exclusiveOkay, AxiResponse.okay)
 
   io.axi.r.valid := io.nativeReadData.valid && readTags.io.deq.valid
   io.axi.r.bits.id := readTags.io.deq.bits.id
   io.axi.r.bits.data := io.nativeReadData.bits.data
-  io.axi.r.bits.response := AxiResponse.okay
+  io.axi.r.bits.response := readTags.io.deq.bits.response
   io.axi.r.bits.last := readTags.io.deq.bits.last
   io.nativeReadData.ready := io.axi.r.ready && readTags.io.deq.valid
   readTags.io.deq.ready := io.axi.r.ready && io.nativeReadData.valid

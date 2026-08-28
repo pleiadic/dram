@@ -59,9 +59,11 @@ burst-capable Avalon-MM, and an AXI4 bridge. The AXI bridge buffers AW/W/AR
 independently, preserves IDs, implements FIXED/INCR/WRAP address generation,
 and never releases write data before a matching Native command. Its optional
 read-modify-write stage converts partial WSTRB writes into an ordered Native
-read, byte merge, and full-mask write for ECC-capable datapaths. AXI
-sidebands/exclusive accesses remain compatibility work. Narrow Wishbone bursts
-coalesce writes within a Native word, flush
+read, byte merge, and full-mask write for ECC-capable datapaths. AXI address
+channels expose LOCK/CACHE/PROT/QOS/REGION sidebands. Per-ID exclusive monitors
+return EXOKAY for successful reservations and drain failed exclusive writes
+without issuing Native traffic. Narrow Wishbone bursts coalesce writes within
+a Native word, flush
 partial aggregates at burst/cycle boundaries, and reuse cached wide reads;
 random Native-backpressure regressions check the resulting memory image.
 

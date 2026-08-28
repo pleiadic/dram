@@ -22,6 +22,11 @@ class AxiSpec extends AnyFlatSpec with ChiselScalatestTester {
     dut.io.axi.aw.bits.length.poke(0.U)
     dut.io.axi.aw.bits.size.poke(2.U)
     dut.io.axi.aw.bits.burst.poke(AxiBurst.increment)
+    dut.io.axi.aw.bits.lock.poke(false.B)
+    dut.io.axi.aw.bits.cache.poke(0.U)
+    dut.io.axi.aw.bits.prot.poke(0.U)
+    dut.io.axi.aw.bits.qos.poke(0.U)
+    dut.io.axi.aw.bits.region.poke(0.U)
     dut.io.axi.w.valid.poke(false.B)
     dut.io.axi.w.bits.data.poke(0.U)
     dut.io.axi.w.bits.strobe.poke(0.U)
@@ -33,6 +38,11 @@ class AxiSpec extends AnyFlatSpec with ChiselScalatestTester {
     dut.io.axi.ar.bits.length.poke(0.U)
     dut.io.axi.ar.bits.size.poke(2.U)
     dut.io.axi.ar.bits.burst.poke(AxiBurst.increment)
+    dut.io.axi.ar.bits.lock.poke(false.B)
+    dut.io.axi.ar.bits.cache.poke(0.U)
+    dut.io.axi.ar.bits.prot.poke(0.U)
+    dut.io.axi.ar.bits.qos.poke(0.U)
+    dut.io.axi.ar.bits.region.poke(0.U)
     dut.io.axi.r.ready.poke(false.B)
     dut.io.nativeCommand.ready.poke(false.B)
     dut.io.nativeWriteData.ready.poke(false.B)
@@ -41,12 +51,13 @@ class AxiSpec extends AnyFlatSpec with ChiselScalatestTester {
   }
 
   private def sendAw(dut: Axi4ToNative, id: Int, address: Int,
-      length: Int, burst: BigInt = 1): Unit = {
+      length: Int, burst: BigInt = 1, lock: Boolean = false): Unit = {
     dut.io.axi.aw.bits.id.poke(id.U)
     dut.io.axi.aw.bits.address.poke(address.U)
     dut.io.axi.aw.bits.length.poke(length.U)
     dut.io.axi.aw.bits.size.poke(2.U)
     dut.io.axi.aw.bits.burst.poke(burst.U)
+    dut.io.axi.aw.bits.lock.poke(lock.B)
     dut.io.axi.aw.valid.poke(true.B)
     while (!dut.io.axi.aw.ready.peek().litToBoolean) dut.clock.step()
     dut.clock.step()
@@ -54,12 +65,13 @@ class AxiSpec extends AnyFlatSpec with ChiselScalatestTester {
   }
 
   private def sendAr(dut: Axi4ToNative, id: Int, address: Int,
-      length: Int, burst: BigInt = 1): Unit = {
+      length: Int, burst: BigInt = 1, lock: Boolean = false): Unit = {
     dut.io.axi.ar.bits.id.poke(id.U)
     dut.io.axi.ar.bits.address.poke(address.U)
     dut.io.axi.ar.bits.length.poke(length.U)
     dut.io.axi.ar.bits.size.poke(2.U)
     dut.io.axi.ar.bits.burst.poke(burst.U)
+    dut.io.axi.ar.bits.lock.poke(lock.B)
     dut.io.axi.ar.valid.poke(true.B)
     while (!dut.io.axi.ar.ready.peek().litToBoolean) dut.clock.step()
     dut.clock.step()
@@ -348,6 +360,188 @@ class AxiSpec extends AnyFlatSpec with ChiselScalatestTester {
             dut.io.axi.r.ready.poke(false.B)
         }
       }
+      assert(pendingWriteAddress.isEmpty && pendingRead.isEmpty)
+      assert(nativeMemory == expectedMemory)
+    }
+  }
+
+  it should "enforce exclusive monitors without side effects on failed writes" in {
+    test(new Axi4ToNative(cfg)).withAnnotations(backend) { dut =>
+      defaults(dut)
+      val random = new Random(0x4558434c)
+      val nativeMemory = mutable.Map.empty[Int, BigInt]
+      val expectedMemory = mutable.Map.empty[Int, BigInt]
+      for (address <- 0 until 32) {
+        val value = BigInt(32, random)
+        nativeMemory(address) = value
+        expectedMemory(address) = value
+      }
+
+      var pendingWriteAddress = Option.empty[Int]
+      var pendingRead = Option.empty[BigInt]
+      var readPresented = false
+      var stalledCommand = Option.empty[(Boolean, BigInt)]
+      var stalledWrite = Option.empty[(BigInt, BigInt)]
+      val commandTrace = ArrayBuffer.empty[(Boolean, BigInt)]
+
+      def randomizeSidebands(write: Boolean): Unit = {
+        val address = if (write) dut.io.axi.aw.bits else dut.io.axi.ar.bits
+        address.cache.poke(random.nextInt(16).U)
+        address.prot.poke(random.nextInt(8).U)
+        address.qos.poke(random.nextInt(16).U)
+        address.region.poke(random.nextInt(16).U)
+      }
+
+      def tick(): Unit = {
+        val commandReady = random.nextInt(4) != 0
+        val writeReady = random.nextBoolean()
+        if (pendingRead.nonEmpty && !readPresented && random.nextBoolean())
+          readPresented = true
+        dut.io.nativeCommand.ready.poke(commandReady.B)
+        dut.io.nativeWriteData.ready.poke(writeReady.B)
+        dut.io.nativeReadData.valid.poke(readPresented.B)
+        dut.io.nativeReadData.bits.data.poke(pendingRead.getOrElse(BigInt(0)).U)
+
+        val commandValid = dut.io.nativeCommand.valid.peek().litToBoolean
+        val command = (dut.io.nativeCommand.bits.write.peek().litToBoolean,
+          dut.io.nativeCommand.bits.address.peek().litValue)
+        stalledCommand.foreach { held =>
+          assert(commandValid && command == held,
+            "exclusive Native command changed while stalled")
+        }
+        stalledCommand = if (commandValid && !commandReady) Some(command) else None
+
+        val writeValid = dut.io.nativeWriteData.valid.peek().litToBoolean
+        val write = (dut.io.nativeWriteData.bits.data.peek().litValue,
+          dut.io.nativeWriteData.bits.byteEnable.peek().litValue)
+        stalledWrite.foreach { held =>
+          assert(writeValid && write == held,
+            "exclusive Native write changed while stalled")
+        }
+        stalledWrite = if (writeValid && !writeReady) Some(write) else None
+
+        if (commandValid && commandReady) {
+          commandTrace += command
+          if (command._1) {
+            assert(pendingWriteAddress.isEmpty)
+            pendingWriteAddress = Some(command._2.toInt)
+          } else {
+            assert(pendingRead.isEmpty)
+            pendingRead = Some(nativeMemory(command._2.toInt))
+            readPresented = false
+          }
+        }
+        if (writeValid && writeReady) {
+          val address = pendingWriteAddress.getOrElse(
+            fail("exclusive Native write data arrived without a command"))
+          var value = nativeMemory(address)
+          for (byte <- 0 until 4 if ((write._2 >> byte) & 1) != 0) {
+            val mask = BigInt(0xff) << (8 * byte)
+            value = (value & ~mask) | (write._1 & mask)
+          }
+          nativeMemory(address) = value
+          pendingWriteAddress = None
+        }
+        val readFire = readPresented && dut.io.nativeReadData.ready.peek().litToBoolean
+        dut.clock.step()
+        if (readFire) {
+          pendingRead = None
+          readPresented = false
+        }
+      }
+
+      def runRead(id: Int, address: Int, exclusive: Boolean): Unit = {
+        commandTrace.clear()
+        dut.io.nativeCommand.ready.poke(false.B)
+        randomizeSidebands(write = false)
+        sendAr(dut, id, address * 4, length = 0, lock = exclusive)
+        dut.io.axi.r.ready.poke(false.B)
+        var cycles = 0
+        while (!dut.io.axi.r.valid.peek().litToBoolean && cycles < 200) {
+          tick()
+          cycles += 1
+        }
+        assert(cycles < 200, s"exclusive-mode read timed out at $address")
+        dut.io.axi.r.bits.id.expect(id.U)
+        dut.io.axi.r.bits.data.expect(expectedMemory(address).U)
+        dut.io.axi.r.bits.response.expect(
+          (if (exclusive) AxiResponse.exclusiveOkay else AxiResponse.okay))
+        dut.io.axi.r.bits.last.expect(true.B)
+        assert(commandTrace == Seq(false -> BigInt(address)))
+        val held = (dut.io.axi.r.bits.id.peek().litValue,
+          dut.io.axi.r.bits.data.peek().litValue,
+          dut.io.axi.r.bits.response.peek().litValue)
+        tick()
+        assert(dut.io.axi.r.valid.peek().litToBoolean)
+        assert(held == (dut.io.axi.r.bits.id.peek().litValue,
+          dut.io.axi.r.bits.data.peek().litValue,
+          dut.io.axi.r.bits.response.peek().litValue))
+        dut.io.axi.r.ready.poke(true.B)
+        tick()
+        dut.io.axi.r.ready.poke(false.B)
+      }
+
+      def runWrite(id: Int, address: Int, data: BigInt, exclusive: Boolean,
+          succeeds: Boolean): Unit = {
+        commandTrace.clear()
+        dut.io.nativeCommand.ready.poke(false.B)
+        dut.io.nativeWriteData.ready.poke(false.B)
+        randomizeSidebands(write = true)
+        sendAw(dut, id, address * 4, length = 0, lock = exclusive)
+        sendW(dut, data, last = true)
+        dut.io.axi.b.ready.poke(false.B)
+        var cycles = 0
+        while (!dut.io.axi.b.valid.peek().litToBoolean && cycles < 200) {
+          tick()
+          cycles += 1
+        }
+        assert(cycles < 200, s"exclusive-mode write timed out at $address")
+        dut.io.axi.b.bits.id.expect(id.U)
+        dut.io.axi.b.bits.response.expect(
+          (if (exclusive && succeeds) AxiResponse.exclusiveOkay else AxiResponse.okay))
+        if (succeeds) {
+          assert(commandTrace == Seq(true -> BigInt(address)))
+          expectedMemory(address) = data
+        } else {
+          assert(commandTrace.isEmpty, "failed exclusive write reached Native")
+        }
+        assert(nativeMemory(address) == expectedMemory(address))
+        val held = (dut.io.axi.b.bits.id.peek().litValue,
+          dut.io.axi.b.bits.response.peek().litValue)
+        tick()
+        assert(dut.io.axi.b.valid.peek().litToBoolean)
+        assert(held == (dut.io.axi.b.bits.id.peek().litValue,
+          dut.io.axi.b.bits.response.peek().litValue))
+        dut.io.axi.b.ready.poke(true.B)
+        tick()
+        dut.io.axi.b.ready.poke(false.B)
+      }
+
+      for (round <- 0 until 12) {
+        val id = round & 3
+        val address = random.nextInt(24)
+        runRead(id, address, exclusive = true)
+        round % 3 match {
+          case 0 =>
+            runWrite(id, address, BigInt(32, random), exclusive = true,
+              succeeds = true)
+          case 1 =>
+            val interference = 24 + random.nextInt(8)
+            runWrite((id + 1) & 3, interference, BigInt(32, random),
+              exclusive = false, succeeds = true)
+            runWrite(id, address, BigInt(32, random), exclusive = true,
+              succeeds = false)
+          case 2 =>
+            val mismatched = (address + 1) % 24
+            runWrite(id, mismatched, BigInt(32, random), exclusive = true,
+              succeeds = false)
+        }
+        runRead(id, address, exclusive = false)
+      }
+
+      // An exclusive write without a preceding exclusive read must also fail.
+      runWrite(id = 7, address = 3, data = BigInt("deadbeef", 16),
+        exclusive = true, succeeds = false)
       assert(pendingWriteAddress.isEmpty && pendingRead.isEmpty)
       assert(nativeMemory == expectedMemory)
     }
