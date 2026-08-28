@@ -19,6 +19,14 @@ object SecDed {
   }
 }
 
+object LiteDramEccNative {
+  def encodedDataBits(dataBits: Int, burstCycles: Int): Int = {
+    require(dataBits % burstCycles == 0)
+    val codecBits = SecDed.encodedBits(dataBits / burstCycles)
+    ((codecBits + 7) / 8) * 8 * burstCycles
+  }
+}
+
 /** LiteX-compatible systematic extended-Hamming encoder (overall parity at bit 0). */
 class SecDedEncoder(dataBits: Int) extends Module {
   private val encodedBits = SecDed.encodedBits(dataBits)
@@ -86,7 +94,8 @@ class SecDedDecoder(dataBits: Int) extends Module {
 class LiteDramEccWrite(dataBits: Int, burstCycles: Int = 8) extends Module {
   require(dataBits % burstCycles == 0 && dataBits % 8 == 0)
   private val laneDataBits = dataBits / burstCycles
-  private val laneEncodedBits = SecDed.encodedBits(laneDataBits)
+  private val laneCodecBits = SecDed.encodedBits(laneDataBits)
+  private val laneEncodedBits = ((laneCodecBits + 7) / 8) * 8
   private val encodedBits = laneEncodedBits * burstCycles
   require(laneDataBits % 8 == 0 && encodedBits % 8 == 0,
     "ECC aggregate widths must preserve byte granularity")
@@ -124,7 +133,8 @@ class LiteDramEccWrite(dataBits: Int, burstCycles: Int = 8) extends Module {
 class LiteDramEccRead(dataBits: Int, burstCycles: Int = 8) extends Module {
   require(dataBits % burstCycles == 0 && dataBits % 8 == 0)
   private val laneDataBits = dataBits / burstCycles
-  private val laneEncodedBits = SecDed.encodedBits(laneDataBits)
+  private val laneCodecBits = SecDed.encodedBits(laneDataBits)
+  private val laneEncodedBits = ((laneCodecBits + 7) / 8) * 8
   private val encodedBits = laneEncodedBits * burstCycles
   require(encodedBits % 8 == 0)
 
@@ -145,9 +155,8 @@ class LiteDramEccRead(dataBits: Int, burstCycles: Int = 8) extends Module {
   for (lane <- 0 until burstCycles) {
     val decoder = Module(new SecDedDecoder(laneDataBits))
     val inputLow = lane * laneEncodedBits
-    val inputHigh = inputLow + laneEncodedBits - 1
     decoder.io.enable := io.enable
-    decoder.io.input := io.input.bits.data(inputHigh, inputLow)
+    decoder.io.input := io.input.bits.data(inputLow + laneCodecBits - 1, inputLow)
     decodedLanes(lane) := decoder.io.output
     single(lane) := io.output.valid && decoder.io.singleError
     double(lane) := io.output.valid && decoder.io.doubleError
@@ -199,4 +208,85 @@ class LiteDramEccStatus extends Module {
   io.singleCount := singleCount
   io.doubleCount := doubleCount
   io.writeEnableCount := writeEnableCount
+}
+
+/**
+  * Integrated LiteDRAM Native ECC datapath. Commands retain their logical word
+  * address while write/read payloads expand/contract between the logical and
+  * encoded widths. Optional RMW converts partial logical writes into full-word
+  * writes before encoding, matching ECC memories without sub-word updates.
+  */
+class LiteDramEccNative(addressWidth: Int, dataBits: Int, burstCycles: Int = 8,
+    withReadModifyWrite: Boolean = false, withErrorInjection: Boolean = false)
+    extends Module {
+  require(addressWidth >= 1 && dataBits >= 8 && dataBits % 8 == 0)
+  private val encodedBits = LiteDramEccNative.encodedDataBits(dataBits, burstCycles)
+  require(encodedBits % 8 == 0, "encoded Native width must preserve byte granularity")
+
+  val io = IO(new Bundle {
+    val enable = Input(Bool())
+    val clear = Input(Bool())
+    val flip = Input(UInt(8.W))
+    val inputCommand = Flipped(Decoupled(new NativeAdapterCommand(addressWidth)))
+    val inputWriteData = Flipped(Decoupled(new NativeAdapterWriteData(dataBits)))
+    val outputReadData = Decoupled(new NativeAdapterReadData(dataBits))
+    val outputCommand = Decoupled(new NativeAdapterCommand(addressWidth))
+    val outputWriteData = Decoupled(new NativeAdapterWriteData(encodedBits))
+    val inputReadData = Flipped(Decoupled(new NativeAdapterReadData(encodedBits)))
+    val singleErrors = Output(UInt(burstCycles.W))
+    val doubleErrors = Output(UInt(burstCycles.W))
+    val writeEnableError = Output(Bool())
+    val singleDetected = Output(Bool())
+    val doubleDetected = Output(Bool())
+    val singleCount = Output(UInt(32.W))
+    val doubleCount = Output(UInt(32.W))
+    val writeEnableCount = Output(UInt(32.W))
+  })
+
+  private val encoder = Module(new LiteDramEccWrite(dataBits, burstCycles))
+  private val decoder = Module(new LiteDramEccRead(dataBits, burstCycles))
+  private val writeBuffer = Module(new Queue(
+    new NativeAdapterWriteData(encodedBits), 1, pipe = false, flow = false))
+  private val readBuffer = Module(new Queue(
+    new NativeAdapterReadData(dataBits), 1, pipe = false, flow = false))
+  private val status = Module(new LiteDramEccStatus)
+
+  if (withReadModifyWrite) {
+    val rmw = Module(new NativeAdapterReadModifyWrite(addressWidth, dataBits))
+    rmw.io.inputCommand <> io.inputCommand
+    rmw.io.inputWriteData <> io.inputWriteData
+    io.outputReadData <> rmw.io.outputReadData
+    io.outputCommand <> rmw.io.outputCommand
+    encoder.io.input <> rmw.io.outputWriteData
+    rmw.io.inputReadData <> readBuffer.io.deq
+  } else {
+    io.outputCommand <> io.inputCommand
+    encoder.io.input <> io.inputWriteData
+    io.outputReadData <> readBuffer.io.deq
+  }
+
+  writeBuffer.io.enq.valid := encoder.io.output.valid
+  encoder.io.output.ready := writeBuffer.io.enq.ready
+  writeBuffer.io.enq.bits.data := encoder.io.output.bits.data ^
+    Mux(withErrorInjection.B, io.flip, 0.U)
+  writeBuffer.io.enq.bits.byteEnable := encoder.io.output.bits.byteEnable
+  io.outputWriteData <> writeBuffer.io.deq
+  decoder.io.input <> io.inputReadData
+  decoder.io.enable := io.enable
+  readBuffer.io.enq <> decoder.io.output
+
+  io.singleErrors := decoder.io.singleErrors
+  io.doubleErrors := decoder.io.doubleErrors
+  io.writeEnableError := encoder.io.writeEnableError
+  status.io.clear := io.clear
+  status.io.singleError := decoder.io.output.fire && decoder.io.singleErrors.orR
+  status.io.doubleError := decoder.io.output.fire && decoder.io.doubleErrors.orR
+  status.io.writeEnableError := encoder.io.input.fire && encoder.io.writeEnableError
+  io.singleDetected := status.io.singleDetected
+  io.doubleDetected := status.io.doubleDetected
+  io.singleCount := status.io.singleCount
+  io.doubleCount := status.io.doubleCount
+  io.writeEnableCount := status.io.writeEnableCount
+
+  if (!withErrorInjection) dontTouch(io.flip)
 }

@@ -24,27 +24,27 @@ class NativeAdapterReadData(dataWidth: Int) extends Bundle {
   * read followed by a full-mask write, and its upstream write-data handshake
   * is delayed until that final write has reached the downstream Native port.
   */
-class NativeReadModifyWrite(config: DramConfig) extends Module {
-  private val nativeAddressWidth = config.addressBits - config.byteOffsetBits
-  private val byteCount = config.dataBits / 8
+class NativeAdapterReadModifyWrite(addressWidth: Int, dataWidth: Int) extends Module {
+  require(addressWidth >= 1 && dataWidth >= 8 && dataWidth % 8 == 0)
+  private val byteCount = dataWidth / 8
 
   val io = IO(new Bundle {
-    val inputCommand = Flipped(Decoupled(new NativeCommand(config)))
-    val inputWriteData = Flipped(Decoupled(new NativeWriteData(config)))
-    val outputReadData = Decoupled(new NativeReadData(config))
-    val outputCommand = Decoupled(new NativeCommand(config))
-    val outputWriteData = Decoupled(new NativeWriteData(config))
-    val inputReadData = Flipped(Decoupled(new NativeReadData(config)))
+    val inputCommand = Flipped(Decoupled(new NativeAdapterCommand(addressWidth)))
+    val inputWriteData = Flipped(Decoupled(new NativeAdapterWriteData(dataWidth)))
+    val outputReadData = Decoupled(new NativeAdapterReadData(dataWidth))
+    val outputCommand = Decoupled(new NativeAdapterCommand(addressWidth))
+    val outputWriteData = Decoupled(new NativeAdapterWriteData(dataWidth))
+    val inputReadData = Flipped(Decoupled(new NativeAdapterReadData(dataWidth)))
   })
 
   private val Seq(sIdle, sClassifyWrite, sPassWriteCommand, sPassWriteData,
     sRmwReadCommand, sRmwReadData, sRmwWriteCommand, sRmwWriteData,
     sPassReadCommand, sPassReadData) = Enum(10)
   private val state = RegInit(sIdle)
-  private val address = Reg(UInt(nativeAddressWidth.W))
-  private val partialData = Reg(UInt(config.dataBits.W))
+  private val address = Reg(UInt(addressWidth.W))
+  private val partialData = Reg(UInt(dataWidth.W))
   private val partialByteEnable = Reg(UInt(byteCount.W))
-  private val mergedData = Reg(UInt(config.dataBits.W))
+  private val mergedData = Reg(UInt(dataWidth.W))
 
   io.inputCommand.ready := false.B
   io.inputWriteData.ready := false.B
@@ -133,6 +133,45 @@ class NativeReadModifyWrite(config: DramConfig) extends Module {
       when(io.outputReadData.fire) { state := sIdle }
     }
   }
+}
+
+/** DramConfig-typed compatibility wrapper around the generic RMW stage. */
+class NativeReadModifyWrite(config: DramConfig) extends Module {
+  private val addressWidth = config.addressBits - config.byteOffsetBits
+  val io = IO(new Bundle {
+    val inputCommand = Flipped(Decoupled(new NativeCommand(config)))
+    val inputWriteData = Flipped(Decoupled(new NativeWriteData(config)))
+    val outputReadData = Decoupled(new NativeReadData(config))
+    val outputCommand = Decoupled(new NativeCommand(config))
+    val outputWriteData = Decoupled(new NativeWriteData(config))
+    val inputReadData = Flipped(Decoupled(new NativeReadData(config)))
+  })
+
+  private val rmw = Module(new NativeAdapterReadModifyWrite(
+    addressWidth, config.dataBits))
+  rmw.io.inputCommand.valid := io.inputCommand.valid
+  rmw.io.inputCommand.bits.write := io.inputCommand.bits.write
+  rmw.io.inputCommand.bits.address := io.inputCommand.bits.address
+  io.inputCommand.ready := rmw.io.inputCommand.ready
+  rmw.io.inputWriteData.valid := io.inputWriteData.valid
+  rmw.io.inputWriteData.bits.data := io.inputWriteData.bits.data
+  rmw.io.inputWriteData.bits.byteEnable := io.inputWriteData.bits.byteEnable
+  io.inputWriteData.ready := rmw.io.inputWriteData.ready
+  io.outputReadData.valid := rmw.io.outputReadData.valid
+  io.outputReadData.bits.data := rmw.io.outputReadData.bits.data
+  rmw.io.outputReadData.ready := io.outputReadData.ready
+
+  io.outputCommand.valid := rmw.io.outputCommand.valid
+  io.outputCommand.bits.write := rmw.io.outputCommand.bits.write
+  io.outputCommand.bits.address := rmw.io.outputCommand.bits.address
+  rmw.io.outputCommand.ready := io.outputCommand.ready
+  io.outputWriteData.valid := rmw.io.outputWriteData.valid
+  io.outputWriteData.bits.data := rmw.io.outputWriteData.bits.data
+  io.outputWriteData.bits.byteEnable := rmw.io.outputWriteData.bits.byteEnable
+  rmw.io.outputWriteData.ready := io.outputWriteData.ready
+  rmw.io.inputReadData.valid := io.inputReadData.valid
+  rmw.io.inputReadData.bits.data := io.inputReadData.bits.data
+  io.inputReadData.ready := rmw.io.inputReadData.ready
 }
 
 /**

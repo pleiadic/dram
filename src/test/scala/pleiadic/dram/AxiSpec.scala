@@ -2,7 +2,6 @@ package pleiadic.dram
 
 import chisel3._
 import chiseltest._
-import chiseltest.simulator.{VerilatorBackendAnnotation, VerilatorCFlags}
 import org.scalatest.flatspec.AnyFlatSpec
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
@@ -12,9 +11,6 @@ import scala.util.Random
 class AxiSpec extends AnyFlatSpec with ChiselScalatestTester {
   private val cfg = DramConfig(addressBits = 16, dataBits = 32, bankBits = 1,
     rowBits = 5, columnBits = 4, timing = DramTiming(tRefi = 100))
-  private val backend = Seq(VerilatorBackendAnnotation,
-    VerilatorCFlags(Seq("-DWData=IData")))
-
   private def defaults(dut: Axi4ToNative): Unit = {
     dut.io.axi.aw.valid.poke(false.B)
     dut.io.axi.aw.bits.id.poke(0.U)
@@ -109,7 +105,7 @@ class AxiSpec extends AnyFlatSpec with ChiselScalatestTester {
   behavior of "Axi4ToNative"
 
   it should "never release write data before its Native command and hold B under backpressure" in {
-    test(new Axi4ToNative(cfg, baseAddress = 0x100)).withAnnotations(backend) { dut =>
+    test(new Axi4ToNative(cfg, baseAddress = 0x100)) { dut =>
       defaults(dut)
       sendAw(dut, id = 5, address = 0x110, length = 0)
       sendW(dut, data = BigInt("deadbeef", 16), last = true)
@@ -145,7 +141,7 @@ class AxiSpec extends AnyFlatSpec with ChiselScalatestTester {
 
   it should "lock command arbitration across bursts under randomized Native backpressure" in {
     test(new Axi4ToNative(cfg, maxBurstLength = 8, writeDataQueueDepth = 8,
-      baseAddress = 0x100)).withAnnotations(backend) { dut =>
+      baseAddress = 0x100)) { dut =>
       defaults(dut)
       sendAw(dut, id = 3, address = 0x120, length = 2)
       sendW(dut, 0x11, last = false)
@@ -185,7 +181,7 @@ class AxiSpec extends AnyFlatSpec with ChiselScalatestTester {
 
   it should "generate wrapping read addresses and preserve ID and RLAST while stalled" in {
     test(new Axi4ToNative(cfg, maxBurstLength = 8,
-      baseAddress = 0x100)).withAnnotations(backend) { dut =>
+      baseAddress = 0x100)) { dut =>
       defaults(dut)
       sendAr(dut, id = 9, address = 0x118, length = 3, burst = 2)
 
@@ -226,7 +222,7 @@ class AxiSpec extends AnyFlatSpec with ChiselScalatestTester {
   }
 
   it should "complete partial writes through RMW before responding under random backpressure" in {
-    test(new Axi4ToNative(cfg, withReadModifyWrite = true)).withAnnotations(backend) { dut =>
+    test(new Axi4ToNative(cfg, withReadModifyWrite = true)) { dut =>
       case class Write(address: Int, data: BigInt, strobe: Int)
       case class Read(address: Int)
 
@@ -373,7 +369,7 @@ class AxiSpec extends AnyFlatSpec with ChiselScalatestTester {
   }
 
   it should "enforce exclusive monitors without side effects on failed writes" in {
-    test(new Axi4ToNative(cfg)).withAnnotations(backend) { dut =>
+    test(new Axi4ToNative(cfg)) { dut =>
       defaults(dut)
       val random = new Random(0x4558434c)
       val protocol = new Axi4ProtocolChecker(dut)
