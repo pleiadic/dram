@@ -1,0 +1,158 @@
+package pleiadic.dram
+
+import chisel3._
+import chiseltest._
+import org.scalatest.flatspec.AnyFlatSpec
+import scala.collection.mutable
+import scala.language.reflectiveCalls
+import scala.util.Random
+
+class LiteDramDfiCoreHarness(config: DramConfig) extends Module {
+  val io = IO(new Bundle {
+    val master = new NativeSlavePort(config)
+    val protocolError = Output(Bool())
+    val errors = Output(UInt(32.W))
+    val refreshes = Output(UInt(16.W))
+  })
+
+  private val core = Module(new LiteDramDfiCore(config, masterCount = 1))
+  private val memory = Module(new DfiMemoryModel(config,
+    readLatency = config.readLatency, writeLatency = 0))
+
+  core.io.masters(0).command.valid := io.master.command.valid
+  core.io.masters(0).command.bits := io.master.command.bits
+  io.master.command.ready := core.io.masters(0).command.ready
+  core.io.masters(0).writeData.valid := io.master.writeData.valid
+  core.io.masters(0).writeData.bits := io.master.writeData.bits
+  io.master.writeData.ready := core.io.masters(0).writeData.ready
+  io.master.readData.valid := core.io.masters(0).readData.valid
+  io.master.readData.bits := core.io.masters(0).readData.bits
+  core.io.masters(0).readData.ready := io.master.readData.ready
+  core.io.masters(0).flush := io.master.flush
+  io.master.lock := core.io.masters(0).lock
+
+  memory.io.dfi := core.io.dfi
+  memory.io.clearErrors := false.B
+  core.io.phyRead := memory.io.read
+  io.protocolError := memory.io.protocolError
+  io.errors := memory.io.errors
+  private val refreshCommand = core.io.dfi.phases.map { phase =>
+    !phase.csN.asUInt.andR && phase.actN && !phase.rasN &&
+      !phase.casN && phase.weN
+  }.reduce(_ || _)
+  private val refreshes = RegInit(0.U(16.W))
+  when(refreshCommand && !refreshes.andR) { refreshes := refreshes + 1.U }
+  io.refreshes := refreshes
+}
+
+class LiteDramDfiCoreSpec extends AnyFlatSpec with ChiselScalatestTester {
+  private val config = DramConfig(addressBits = 8, dataBits = 32,
+    bankBits = 1, rowBits = 2, columnBits = 2, nPhases = 2, nranks = 2,
+    phyDataBits = 32, readPhase = 0, writePhase = 1,
+    cmdBufferDepth = 4, readTime = 4, writeTime = 4,
+    readLatency = 1, writeLatency = 0,
+    timing = DramTiming(tRcd = 1, tRp = 1, tRas = 2, tRc = 2,
+      tCcd = 1, tWr = 1, tWtr = 1, tRtp = 1, tRrd = 1, tFaw = 8,
+      tRefi = 32, tRfc = 2))
+
+  private def address(rank: Int, row: Int, bank: Int, column: Int): Int =
+    (((rank << config.rowBits | row) << config.bankBits | bank) <<
+      config.columnBits) | column
+
+  private def sendCommand(dut: LiteDramDfiCoreHarness, location: Int,
+      write: Boolean): Unit = {
+    val command = dut.io.master.command
+    command.valid.poke(true.B)
+    command.bits.address.poke(location.U)
+    command.bits.write.poke(write.B)
+    var timeout = 0
+    while (!command.ready.peek().litToBoolean && timeout < 1000) {
+      dut.clock.step()
+      timeout += 1
+    }
+    assert(timeout < 1000, s"command $location timed out")
+    dut.clock.step()
+    command.valid.poke(false.B)
+  }
+
+  private def sendWriteData(dut: LiteDramDfiCoreHarness, data: BigInt,
+      byteEnable: Int = 0xf): Unit = {
+    val write = dut.io.master.writeData
+    write.valid.poke(true.B)
+    write.bits.data.poke(data.U)
+    write.bits.byteEnable.poke(byteEnable.U)
+    var timeout = 0
+    while (!write.ready.peek().litToBoolean && timeout < 1000) {
+      dut.clock.step()
+      timeout += 1
+    }
+    assert(timeout < 1000, "write-data enqueue timed out")
+    dut.clock.step()
+    write.valid.poke(false.B)
+  }
+
+  behavior of "LiteDramDfiCore"
+
+  it should "preserve multi-bank and multi-rank data through a DFI memory model" in {
+    test(new LiteDramDfiCoreHarness(config)) { dut =>
+      val master = dut.io.master
+      master.flush.poke(false.B)
+      master.command.valid.poke(false.B)
+      master.writeData.valid.poke(false.B)
+      master.readData.ready.poke(true.B)
+
+      val rng = new Random(0x444649434f5245L)
+      val expected = mutable.LinkedHashMap.empty[Int, BigInt]
+      for (index <- 0 until 32) {
+        val rank = rng.nextInt(config.nranks)
+        val row = rng.nextInt(1 << config.rowBits)
+        val bank = rng.nextInt(config.bankCount)
+        val column = rng.nextInt(1 << config.columnBits)
+        val location = address(rank, row, bank, column)
+        val value = BigInt(32, rng)
+        sendWriteData(dut, value)
+        sendCommand(dut, location, write = true)
+        expected(location) = value
+      }
+
+      // Exercise byte-enable polarity through the Native-to-DFI mask path.
+      val maskedLocation = expected.head._1
+      val replacement = BigInt("a1b2c3d4", 16)
+      sendWriteData(dut, replacement, byteEnable = 0x5)
+      sendCommand(dut, maskedLocation, write = true)
+      expected(maskedLocation) =
+        (expected(maskedLocation) & BigInt("ff00ff00", 16)) |
+        (replacement & BigInt("00ff00ff", 16))
+
+      for ((location, value) <- expected) {
+        master.readData.ready.poke(false.B)
+        sendCommand(dut, location, write = false)
+        var timeout = 0
+        var accepted = false
+        var stalled = Option.empty[BigInt]
+        while (!accepted && timeout < 2000) {
+          val ready = rng.nextInt(100) < 58
+          master.readData.ready.poke(ready.B)
+          if (master.readData.valid.peek().litToBoolean) {
+            val observed = master.readData.bits.data.peek().litValue
+            stalled.foreach(previous => assert(observed == previous,
+              s"read $location changed under backpressure"))
+            assert(observed == value,
+              s"read $location returned 0x${observed.toString(16)} instead of " +
+                s"0x${value.toString(16)}")
+            accepted = ready
+            stalled = if (ready) None else Some(observed)
+          }
+          dut.clock.step()
+          timeout += 1
+        }
+        assert(timeout < 2000, s"read $location timed out")
+      }
+
+      master.readData.ready.poke(true.B)
+      assert(dut.io.refreshes.peek().litValue > 0, "random run issued no refreshes")
+      dut.io.protocolError.expect(false.B)
+      dut.io.errors.expect(0.U)
+    }
+  }
+}
