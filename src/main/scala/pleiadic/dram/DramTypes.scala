@@ -43,6 +43,49 @@ case class DramTiming(
   require(tRefi >= 1 && tRfc >= 1)
 }
 
+/** Host/native-port shape, independent of DRAM geometry and PHY rate. */
+case class DramNativeConfig(addressBits: Int = 24, dataBits: Int = 32) {
+  require(addressBits > 0)
+  require(dataBits > 0 && dataBits % 8 == 0)
+}
+
+/** Physical memory organization. */
+case class DramGeometryConfig(bankBits: Int = 2, rowBits: Int = 10,
+    columnBits: Int = 8, nranks: Int = 1) {
+  require(bankBits > 0 && rowBits > 0 && columnBits > 0)
+  require(nranks > 0 && (nranks & (nranks - 1)) == 0,
+    "nranks must be a power of two")
+}
+
+/** DFI/PHY rate and width contract. Zero widths inherit from the enclosing config. */
+case class DramPhyConfig(memType: String = "SDR", nPhases: Int = 1,
+    phyDataBits: Int = 0, padDataBits: Int = 0, burstLength: Int = 1,
+    readLatency: Int = 1, writeLatency: Int = 0) {
+  require(DramPhyConfig.supportedMemoryTypes.contains(memType))
+  require(nPhases > 0 && phyDataBits >= 0 && padDataBits >= 0)
+  require(burstLength > 0 && (burstLength & (burstLength - 1)) == 0)
+  require(readLatency >= 1 && writeLatency >= 0)
+}
+
+object DramPhyConfig {
+  val supportedMemoryTypes: Set[String] = Set(
+    "SDR", "DDR", "LPDDR", "DDR2", "DDR3", "RPC", "DDR4", "LPDDR4", "LPDDR5")
+}
+
+/** Controller policy and timing, independent of interface widths. */
+case class DramControllerConfig(timing: DramTiming = DramTiming(),
+    withAutoPrecharge: Boolean = false,
+    addressMapping: DramAddressMapping = DramAddressMapping.RowBankColumn,
+    refreshPostponing: Int = 1, cmdBufferDepth: Int = 8,
+    readTime: Int = 32, writeTime: Int = 16,
+    zqCalibrationPeriodCycles: Option[Int] = None) {
+  require(refreshPostponing >= 1 && refreshPostponing <= 8)
+  require(cmdBufferDepth >= 1 && readTime >= 0 && writeTime >= 0)
+  require(zqCalibrationPeriodCycles.forall(_ >= 1))
+  require(zqCalibrationPeriodCycles.isEmpty || timing.tZqcs.nonEmpty,
+    "automatic ZQ calibration requires timing.tZqcs")
+}
+
 case class DramConfig(
   addressBits: Int = 24,
   dataBits: Int = 32,
@@ -73,6 +116,14 @@ case class DramConfig(
   // embedding a clock-frequency unit in the synthesizable configuration.
   zqCalibrationPeriodCycles: Option[Int] = None
 ) {
+  val native: DramNativeConfig = DramNativeConfig(addressBits, dataBits)
+  val geometry: DramGeometryConfig =
+    DramGeometryConfig(bankBits, rowBits, columnBits, nranks)
+  val phy: DramPhyConfig = DramPhyConfig(memType, nPhases, phyDataBits,
+    padDataBits, burstLength, readLatency, writeLatency)
+  val controller: DramControllerConfig = DramControllerConfig(timing,
+    withAutoPrecharge, addressMapping, refreshPostponing, cmdBufferDepth,
+    readTime, writeTime, zqCalibrationPeriodCycles)
   val byteOffsetBits: Int = log2Ceil(dataBits / 8)
   require(addressBits > 0 && dataBits > 0 && dataBits % 8 == 0)
   require(bankBits > 0 && rowBits > 0 && columnBits > 0)
@@ -87,7 +138,7 @@ case class DramConfig(
   require(zqCalibrationPeriodCycles.forall(_ >= 1))
   require(zqCalibrationPeriodCycles.isEmpty || timing.tZqcs.nonEmpty,
     "automatic ZQ calibration requires timing.tZqcs")
-  require(Set("SDR", "DDR", "LPDDR", "DDR2", "DDR3", "RPC", "DDR4", "LPDDR4", "LPDDR5").contains(memType))
+  require(DramPhyConfig.supportedMemoryTypes.contains(memType))
   val bankCount: Int = 1 << bankBits
   val rankBankCount: Int = bankCount * nranks
   val memoryWords: Int = nranks * (1 << (bankBits + rowBits + columnBits))
@@ -98,6 +149,35 @@ case class DramConfig(
   require(dataBits >= dfiDataBits)
   val effectivePadDataBits: Int = if (padDataBits == 0) dfiDataBits else padDataBits
   require(effectivePadDataBits > 0 && effectivePadDataBits % 8 == 0)
+}
+
+object DramConfig {
+  /** Layered construction while retaining the historical flat case-class API. */
+  def fromLayers(native: DramNativeConfig, geometry: DramGeometryConfig,
+      phy: DramPhyConfig = DramPhyConfig(),
+      controller: DramControllerConfig = DramControllerConfig()): DramConfig =
+    DramConfig(
+      addressBits = native.addressBits,
+      dataBits = native.dataBits,
+      bankBits = geometry.bankBits,
+      rowBits = geometry.rowBits,
+      columnBits = geometry.columnBits,
+      timing = controller.timing,
+      withAutoPrecharge = controller.withAutoPrecharge,
+      memType = phy.memType,
+      nPhases = phy.nPhases,
+      nranks = geometry.nranks,
+      phyDataBits = phy.phyDataBits,
+      burstLength = phy.burstLength,
+      addressMapping = controller.addressMapping,
+      refreshPostponing = controller.refreshPostponing,
+      cmdBufferDepth = controller.cmdBufferDepth,
+      readTime = controller.readTime,
+      writeTime = controller.writeTime,
+      readLatency = phy.readLatency,
+      writeLatency = phy.writeLatency,
+      padDataBits = phy.padDataBits,
+      zqCalibrationPeriodCycles = controller.zqCalibrationPeriodCycles)
 }
 
 class DramRequest(config: DramConfig) extends Bundle {

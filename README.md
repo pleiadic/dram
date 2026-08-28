@@ -10,6 +10,12 @@ The new synthesizable control path is decomposed into `BankMachine`,
 top level. The original single-request `DramController` is temporarily retained
 as a compatibility/reference model while the simulation PHY is built.
 
+Configuration is available as four independently validated layers:
+`DramNativeConfig`, `DramGeometryConfig`, `DramPhyConfig`, and
+`DramControllerConfig`. `DramConfig.fromLayers` assembles them, while the
+historical flat `DramConfig(...)` constructor remains source-compatible and
+exposes the same layers through `native`, `geometry`, `phy`, and `controller`.
+
 ## LiteDRAM analysis
 
 LiteDRAM is organized into four functional layers:
@@ -42,9 +48,10 @@ The Chisel core maps these responsibilities as follows:
 | Compatibility simulation model | `DramController` |
 | DFI command encoding | `DfiSteerer` |
 
-This is not yet a drop-in replacement for LiteDRAM. In particular, the full
-init/SPD catalog, ECC-integrated Native wrappers, and PHY families remain
-tracked work in the development plan.
+This is not yet a drop-in replacement for LiteDRAM. Remaining compatibility
+work, including ECC-integrated Native wrappers, uncommon DIMM topologies,
+formal acceptance, and vendor toolchain smoke tests, is tracked in the
+development plan.
 
 The frontend layer currently includes Native up/down width conversion, a
 Gray-pointer asynchronous Native CDC, Wishbone B4 with width conversion,
@@ -54,10 +61,13 @@ and never releases write data before a matching Native command. Optional AXI
 sidebands/exclusive accesses, ECC read-modify-write, and narrow-Wishbone burst
 coalescing remain compatibility work.
 
-The asynchronous FIFO regression uses Verilator and derived clocks with
-different periods. ChiselTest 6 requires a local `WData` compatibility define
-when used with Verilator 5.050 or newer; the define is scoped to the test C++
-harness and does not alter generated RTL.
+The CDC layer provides an attributed multi-stage level synchronizer, a
+toggle-based pulse synchronizer, and a Gray-pointer asynchronous FIFO used by
+all three Native-port streams. Regressions cover different derived clocks,
+FIFO wrap/full/empty behavior, and command/write/read directionality.
+ChiselTest 6 requires a local `WData` compatibility define when used with
+Verilator 5.050 or newer; the define is scoped to the test C++ harness and does
+not alter generated RTL.
 
 Functional frontends now also include ordered Native DMA reader/writer engines,
 an equal-width DRAM-backed ring FIFO, incremental/PRBS BIST generation and

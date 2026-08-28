@@ -1,8 +1,76 @@
 package pleiadic.dram
 
 import chisel3._
+import chisel3.experimental.IntParam
 import chisel3.util._
 import scala.language.reflectiveCalls
+
+/** Reusable multi-flop CDC synchronizer with synthesis-recognized attributes. */
+class CdcSynchronizer(width: Int = 1, stages: Int = 2)
+    extends BlackBox(Map("WIDTH" -> IntParam(width), "STAGES" -> IntParam(stages)))
+    with HasBlackBoxInline {
+  require(width >= 1 && stages >= 2)
+  val io = IO(new Bundle {
+    val clock = Input(Clock())
+    val reset = Input(AsyncReset())
+    val asyncInput = Input(UInt(width.W))
+    val syncOutput = Output(UInt(width.W))
+  })
+  setInline("CdcSynchronizer.sv",
+    """module CdcSynchronizer #(
+      |  parameter integer WIDTH = 1,
+      |  parameter integer STAGES = 2
+      |) (
+      |  input wire clock, input wire reset,
+      |  input wire [WIDTH-1:0] asyncInput,
+      |  output wire [WIDTH-1:0] syncOutput
+      |);
+      |  (* ASYNC_REG = "TRUE", SHREG_EXTRACT = "NO" *)
+      |  reg [WIDTH-1:0] pipeline [0:STAGES-1];
+      |  integer index;
+      |  always @(posedge clock or posedge reset) begin
+      |    if (reset) begin
+      |      for (index = 0; index < STAGES; index = index + 1)
+      |        pipeline[index] <= {WIDTH{1'b0}};
+      |    end else begin
+      |      pipeline[0] <= asyncInput;
+      |      for (index = 1; index < STAGES; index = index + 1)
+      |        pipeline[index] <= pipeline[index-1];
+      |    end
+      |  end
+      |  assign syncOutput = pipeline[STAGES-1];
+      |endmodule
+      |""".stripMargin)
+}
+
+/** Toggle-based single-bit pulse transfer. Source pulses must be spaced by the CDC latency. */
+class CdcPulseSynchronizer(stages: Int = 2) extends RawModule {
+  require(stages >= 2)
+  val io = IO(new Bundle {
+    val sourceClock = Input(Clock())
+    val sourceReset = Input(AsyncReset())
+    val destinationClock = Input(Clock())
+    val destinationReset = Input(AsyncReset())
+    val sourcePulse = Input(Bool())
+    val destinationPulse = Output(Bool())
+  })
+  private val sourceToggle = withClockAndReset(io.sourceClock, io.sourceReset) {
+    RegInit(false.B)
+  }
+  withClockAndReset(io.sourceClock, io.sourceReset) {
+    when(io.sourcePulse) { sourceToggle := !sourceToggle }
+  }
+  private val synchronizer = Module(new CdcSynchronizer(1, stages))
+  synchronizer.io.clock := io.destinationClock
+  synchronizer.io.reset := io.destinationReset
+  synchronizer.io.asyncInput := sourceToggle.asUInt
+  private val destinationPrevious = withClockAndReset(
+      io.destinationClock, io.destinationReset) { RegInit(false.B) }
+  withClockAndReset(io.destinationClock, io.destinationReset) {
+    destinationPrevious := synchronizer.io.syncOutput(0)
+  }
+  io.destinationPulse := synchronizer.io.syncOutput(0) ^ destinationPrevious
+}
 
 /**
   * Power-of-two asynchronous FIFO using Gray-coded pointers and two-stage
@@ -41,24 +109,23 @@ class AsyncQueue[T <: Data](gen: T, depth: Int = 4) extends RawModule {
   }
   private val empty = withClockAndReset(io.dequeueClock, io.dequeueReset) { RegInit(true.B) }
 
-  private val readGraySync1 = withClockAndReset(io.enqueueClock, io.enqueueReset) {
-    RegNext(readGray, 0.U)
-  }
-  private val readGraySync2 = withClockAndReset(io.enqueueClock, io.enqueueReset) {
-    RegNext(readGraySync1, 0.U)
-  }
-  private val writeGraySync1 = withClockAndReset(io.dequeueClock, io.dequeueReset) {
-    RegNext(writeGray, 0.U)
-  }
-  private val writeGraySync2 = withClockAndReset(io.dequeueClock, io.dequeueReset) {
-    RegNext(writeGraySync1, 0.U)
-  }
+  private val readPointerSynchronizer = Module(new CdcSynchronizer(pointerBits))
+  readPointerSynchronizer.io.clock := io.enqueueClock
+  readPointerSynchronizer.io.reset := io.enqueueReset
+  readPointerSynchronizer.io.asyncInput := readGray
+  private val readGraySynchronized = readPointerSynchronizer.io.syncOutput
+  private val writePointerSynchronizer = Module(new CdcSynchronizer(pointerBits))
+  writePointerSynchronizer.io.clock := io.dequeueClock
+  writePointerSynchronizer.io.reset := io.dequeueReset
+  writePointerSynchronizer.io.asyncInput := writeGray
+  private val writeGraySynchronized = writePointerSynchronizer.io.syncOutput
 
   private val writeIncrement = io.enqueue.valid && !full
   private val writeBinaryNext = writeBinary + writeIncrement
   private val writeGrayNext = (writeBinaryNext >> 1) ^ writeBinaryNext
-  private val invertedReadGray = Cat(~readGraySync2(pointerBits - 1, pointerBits - 2),
-    readGraySync2(pointerBits - 3, 0))
+  private val invertedReadGray = Cat(
+    ~readGraySynchronized(pointerBits - 1, pointerBits - 2),
+    readGraySynchronized(pointerBits - 3, 0))
   private val fullNext = writeGrayNext === invertedReadGray
 
   io.enqueue.ready := !full
@@ -72,7 +139,7 @@ class AsyncQueue[T <: Data](gen: T, depth: Int = 4) extends RawModule {
   private val readIncrement = io.dequeue.ready && !empty
   private val readBinaryNext = readBinary + readIncrement
   private val readGrayNext = (readBinaryNext >> 1) ^ readBinaryNext
-  private val emptyNext = readGrayNext === writeGraySync2
+  private val emptyNext = readGrayNext === writeGraySynchronized
 
   io.dequeue.valid := !empty
   private val readData = withClock(io.dequeueClock) {
@@ -84,11 +151,6 @@ class AsyncQueue[T <: Data](gen: T, depth: Int = 4) extends RawModule {
     readGray := readGrayNext
     empty := emptyNext
   }
-
-  dontTouch(readGraySync1)
-  dontTouch(readGraySync2)
-  dontTouch(writeGraySync1)
-  dontTouch(writeGraySync2)
 }
 
 /** Clock-domain crossing for the three independent Native-port streams. */
