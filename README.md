@@ -58,8 +58,10 @@ Gray-pointer asynchronous Native CDC, Wishbone B4 with width conversion,
 burst-capable Avalon-MM, and an AXI4 bridge. The AXI bridge buffers AW/W/AR
 independently, preserves IDs, implements FIXED/INCR/WRAP address generation,
 and never releases write data before a matching Native command. Optional AXI
-sidebands/exclusive accesses, ECC read-modify-write, and narrow-Wishbone burst
-coalescing remain compatibility work.
+sidebands/exclusive accesses and ECC read-modify-write remain compatibility
+work. Narrow Wishbone bursts coalesce writes within a Native word, flush
+partial aggregates at burst/cycle boundaries, and reuse cached wide reads;
+random Native-backpressure regressions check the resulting memory image.
 
 The CDC layer provides an attributed multi-stage level synchronizer, a
 toggle-based pulse synchronizer, and a Gray-pointer asynchronous FIFO used by
