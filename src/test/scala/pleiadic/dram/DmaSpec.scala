@@ -250,4 +250,244 @@ class DmaSpec extends AnyFlatSpec with ChiselScalatestTester {
       dut.io.offset.expect(5.U)
     }
   }
+
+  behavior of "LiteDramAxiDmaReader"
+
+  it should "preserve request markers and AXI responses under independent AR/R backpressure" in {
+    test(new LiteDramAxiDmaReader(addressWidth = 16, dataWidth = 32,
+      idWidth = 2, fifoDepth = 4)) { dut =>
+      dut.io.enable.poke(true.B)
+      dut.io.request.valid.poke(false.B)
+      dut.io.request.bits.address.poke(0.U)
+      dut.io.request.bits.last.poke(false.B)
+      dut.io.data.ready.poke(false.B)
+      dut.io.ar.ready.poke(false.B)
+      dut.io.r.valid.poke(false.B)
+      dut.io.r.bits.id.poke(0.U)
+      dut.io.r.bits.data.poke(0.U)
+      dut.io.r.bits.response.poke(AxiResponse.okay)
+      dut.io.r.bits.last.poke(true.B)
+
+      val requests = (0 until 18).map(i =>
+        (BigInt(0x100 + 4 * i), i == 17, BigInt(0x80000000L + i), i % 7 == 3))
+      val pending = scala.collection.mutable.Queue.empty[(BigInt, BigInt)]
+      val addresses = ArrayBuffer.empty[BigInt]
+      val received = ArrayBuffer.empty[(BigInt, BigInt, Boolean)]
+      val random = new Random(0x41585244)
+      var inputIndex = 0
+      var holdingResponse = false
+      var cycles = 0
+      while (received.size < requests.size && cycles < 1000) {
+        dut.io.request.valid.poke((inputIndex < requests.size).B)
+        if (inputIndex < requests.size) {
+          dut.io.request.bits.address.poke(requests(inputIndex)._1.U)
+          dut.io.request.bits.last.poke(requests(inputIndex)._2.B)
+        }
+        dut.io.ar.ready.poke((random.nextInt(3) != 0).B)
+        dut.io.data.ready.poke((random.nextInt(4) != 0).B)
+        if (!holdingResponse && pending.nonEmpty && random.nextBoolean())
+          holdingResponse = true
+        dut.io.r.valid.poke(holdingResponse.B)
+        if (pending.nonEmpty) {
+          dut.io.r.bits.data.poke(pending.front._1.U)
+          dut.io.r.bits.response.poke(pending.front._2.U)
+        }
+
+        val requestFire = dut.io.request.valid.peek().litToBoolean &&
+          dut.io.request.ready.peek().litToBoolean
+        val arFire = dut.io.ar.valid.peek().litToBoolean && dut.io.ar.ready.peek().litToBoolean
+        val rFire = dut.io.r.valid.peek().litToBoolean && dut.io.r.ready.peek().litToBoolean
+        val outputFire = dut.io.data.valid.peek().litToBoolean &&
+          dut.io.data.ready.peek().litToBoolean
+        if (arFire) {
+          dut.io.ar.bits.id.expect(0.U)
+          dut.io.ar.bits.length.expect(0.U)
+          dut.io.ar.bits.size.expect(2.U)
+          dut.io.ar.bits.burst.expect(AxiBurst.increment)
+          addresses += dut.io.ar.bits.address.peek().litValue
+        }
+        val output = if (outputFire) Some((
+          dut.io.data.bits.data.peek().litValue,
+          dut.io.data.bits.response.peek().litValue,
+          dut.io.data.bits.last.peek().litToBoolean)) else None
+        dut.clock.step()
+        if (requestFire) {
+          val request = requests(inputIndex)
+          val response = if (request._4) BigInt(2) else BigInt(0)
+          pending.enqueue(request._3 -> response)
+          inputIndex += 1
+        }
+        if (rFire) {
+          pending.dequeue()
+          holdingResponse = false
+        }
+        output.foreach(received += _)
+        cycles += 1
+      }
+      assert(cycles < 1000)
+      assert(addresses == requests.map(_._1))
+      assert(received == requests.map { case (_, last, data, error) =>
+        (data, if (error) BigInt(2) else BigInt(0), last)
+      })
+      dut.io.busy.expect(false.B)
+    }
+  }
+
+  behavior of "LiteDramAxiDmaWriter"
+
+  it should "couple AW reservations to W data and return every B response" in {
+    test(new LiteDramAxiDmaWriter(addressWidth = 16, dataWidth = 32,
+      idWidth = 2, fifoDepth = 5)) { dut =>
+      dut.io.request.valid.poke(false.B)
+      dut.io.request.bits.address.poke(0.U)
+      dut.io.request.bits.data.poke(0.U)
+      dut.io.request.bits.strobe.poke(0.U)
+      dut.io.request.bits.last.poke(false.B)
+      dut.io.response.ready.poke(false.B)
+      dut.io.aw.ready.poke(false.B)
+      dut.io.w.ready.poke(false.B)
+      dut.io.b.valid.poke(false.B)
+      dut.io.b.bits.id.poke(0.U)
+      dut.io.b.bits.response.poke(AxiResponse.okay)
+
+      val requests = (0 until 24).map(i =>
+        (BigInt(0x200 + 4 * i), BigInt(0x50000000 + i), BigInt((i * 3) & 0xf)))
+      val addresses = ArrayBuffer.empty[BigInt]
+      val writes = ArrayBuffer.empty[(BigInt, BigInt)]
+      val responses = ArrayBuffer.empty[BigInt]
+      val pendingResponses = scala.collection.mutable.Queue.empty[BigInt]
+      val random = new Random(0x41585744)
+      var inputIndex = 0
+      var paired = 0
+      var holdingResponse = false
+      var cycles = 0
+      while (responses.size < requests.size && cycles < 1500) {
+        dut.io.request.valid.poke((inputIndex < requests.size).B)
+        if (inputIndex < requests.size) {
+          val (address, data, strobe) = requests(inputIndex)
+          dut.io.request.bits.address.poke(address.U)
+          dut.io.request.bits.data.poke(data.U)
+          dut.io.request.bits.strobe.poke(strobe.U)
+          dut.io.request.bits.last.poke((inputIndex == requests.size - 1).B)
+        }
+        dut.io.aw.ready.poke((random.nextInt(3) != 0).B)
+        dut.io.w.ready.poke(random.nextBoolean().B)
+        dut.io.response.ready.poke((random.nextInt(4) != 0).B)
+        if (!holdingResponse && pendingResponses.nonEmpty && random.nextBoolean())
+          holdingResponse = true
+        dut.io.b.valid.poke(holdingResponse.B)
+        if (pendingResponses.nonEmpty)
+          dut.io.b.bits.response.poke(pendingResponses.front.U)
+
+        val requestFire = dut.io.request.valid.peek().litToBoolean &&
+          dut.io.request.ready.peek().litToBoolean
+        val awFire = dut.io.aw.valid.peek().litToBoolean && dut.io.aw.ready.peek().litToBoolean
+        val wFire = dut.io.w.valid.peek().litToBoolean && dut.io.w.ready.peek().litToBoolean
+        val bFire = dut.io.b.valid.peek().litToBoolean && dut.io.b.ready.peek().litToBoolean
+        val responseFire = dut.io.response.valid.peek().litToBoolean &&
+          dut.io.response.ready.peek().litToBoolean
+        if (awFire) {
+          dut.io.aw.bits.id.expect(0.U)
+          dut.io.aw.bits.length.expect(0.U)
+          dut.io.aw.bits.size.expect(2.U)
+          addresses += dut.io.aw.bits.address.peek().litValue
+        }
+        if (wFire) {
+          dut.io.w.bits.last.expect(true.B)
+          writes += dut.io.w.bits.data.peek().litValue -> dut.io.w.bits.strobe.peek().litValue
+        }
+        val response = if (responseFire) Some(dut.io.response.bits.response.peek().litValue)
+          else None
+        dut.clock.step()
+        if (requestFire) inputIndex += 1
+        while (paired < addresses.size.min(writes.size)) {
+          pendingResponses.enqueue(if (paired % 9 == 4) BigInt(2) else BigInt(0))
+          paired += 1
+        }
+        if (bFire) {
+          pendingResponses.dequeue()
+          holdingResponse = false
+        }
+        response.foreach(responses += _)
+        cycles += 1
+      }
+      assert(cycles < 1500)
+      assert(addresses == requests.map(_._1))
+      assert(writes == requests.map { case (_, data, strobe) => data -> strobe })
+      assert(responses == requests.indices.map(i => if (i % 9 == 4) BigInt(2) else BigInt(0)))
+      dut.io.busy.expect(false.B)
+    }
+  }
+
+  behavior of "controlled AXI DMAs"
+
+  it should "stride byte addresses by the AXI beat size" in {
+    test(new LiteDramAxiDmaReaderControl(addressWidth = 16, dataWidth = 32,
+      idWidth = 1, fifoDepth = 4)) { dut =>
+      dut.io.enable.poke(false.B)
+      dut.io.base.poke("h180".U)
+      dut.io.length.poke(4.U)
+      dut.io.loop.poke(false.B)
+      dut.io.data.ready.poke(true.B)
+      dut.io.ar.ready.poke(true.B)
+      dut.io.r.valid.poke(false.B)
+      dut.io.r.bits.id.poke(0.U)
+      dut.io.r.bits.data.poke(0.U)
+      dut.io.r.bits.response.poke(AxiResponse.okay)
+      dut.io.r.bits.last.poke(true.B)
+      dut.clock.step()
+      dut.io.enable.poke(true.B)
+      val addresses = ArrayBuffer.empty[BigInt]
+      var cycles = 0
+      while (!dut.io.done.peek().litToBoolean && cycles < 20) {
+        if (dut.io.ar.valid.peek().litToBoolean) addresses +=
+          dut.io.ar.bits.address.peek().litValue
+        dut.clock.step()
+        cycles += 1
+      }
+      assert(addresses == Seq(0x180, 0x184, 0x188, 0x18c).map(BigInt(_)))
+      dut.io.offset.expect(3.U)
+    }
+
+    test(new LiteDramAxiDmaWriterControl(addressWidth = 16, dataWidth = 32,
+      idWidth = 1, fifoDepth = 4)) { dut =>
+      dut.io.enable.poke(false.B)
+      dut.io.base.poke("h240".U)
+      dut.io.length.poke(3.U)
+      dut.io.loop.poke(false.B)
+      dut.io.input.valid.poke(false.B)
+      dut.io.input.bits.poke(0.U)
+      dut.io.response.ready.poke(true.B)
+      dut.io.aw.ready.poke(true.B)
+      dut.io.w.ready.poke(true.B)
+      dut.io.b.valid.poke(false.B)
+      dut.io.b.bits.id.poke(0.U)
+      dut.io.b.bits.response.poke(AxiResponse.okay)
+      dut.clock.step()
+      dut.io.enable.poke(true.B)
+      val addresses = ArrayBuffer.empty[BigInt]
+      val data = ArrayBuffer.empty[BigInt]
+      var inputIndex = 0
+      var cycles = 0
+      while ((inputIndex < 3 || data.size < 3) && cycles < 30) {
+        dut.io.input.valid.poke((inputIndex < 3).B)
+        if (inputIndex < 3) dut.io.input.bits.poke((0xa0 + inputIndex).U)
+        val inputFire = dut.io.input.valid.peek().litToBoolean &&
+          dut.io.input.ready.peek().litToBoolean
+        if (dut.io.aw.valid.peek().litToBoolean) addresses +=
+          dut.io.aw.bits.address.peek().litValue
+        if (dut.io.w.valid.peek().litToBoolean) {
+          dut.io.w.bits.strobe.expect("hf".U)
+          data += dut.io.w.bits.data.peek().litValue
+        }
+        dut.clock.step()
+        if (inputFire) inputIndex += 1
+        cycles += 1
+      }
+      assert(addresses == Seq(0x240, 0x244, 0x248).map(BigInt(_)))
+      assert(data == Seq(0xa0, 0xa1, 0xa2).map(BigInt(_)))
+      dut.io.done.expect(true.B)
+      dut.io.offset.expect(2.U)
+    }
+  }
 }

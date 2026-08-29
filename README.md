@@ -78,16 +78,15 @@ ChiselTest 6 requires a local `WData` compatibility define when used with
 Verilator 5.050 or newer; the define is scoped to the test C++ harness and does
 not alter generated RTL.
 
-Functional frontends now also include ordered Native DMA reader/writer engines
-with contiguous CSR-style transfer control,
-a DRAM-backed ring FIFO with narrow-stream conversion and automatic bypass,
+Functional frontends now also include ordered Native and AXI DMA reader/writer
+engines with contiguous CSR-style transfer control and coherent control/status
+CDC, a DRAM-backed ring FIFO with narrow-stream conversion and automatic bypass,
 incremental/PRBS and fixed-table BIST generation/checking, LiteX-compatible
 per-lane SEC-DED codecs, saturating ECC status counters, and a fixed-window
-bandwidth monitor. Their remaining DMA/control-plane variants are tracked in
-P8. The integrated ECC Native wrapper preserves logical command addresses,
-pads each 32-bit SEC-DED lane to 40 storage bits, buffers both datapath
-directions, supports error injection and status accounting, and can perform
-partial-write RMW before encoding.
+bandwidth monitor. The integrated ECC Native wrapper preserves logical command
+addresses, pads each 32-bit SEC-DED lane to 40 storage bits, buffers both
+datapath directions, supports error injection and status accounting, and can
+perform partial-write RMW before encoding.
 
 The DFI layer exposes the standard DDR4 `act_n` signal and includes a DDR4
 command mux, a hardware/external/software injector with per-phase read-data

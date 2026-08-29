@@ -199,3 +199,117 @@ class NativePortCdc(addressWidth: Int, dataWidth: Int, depth: Int = 4) extends R
   reads.io.enqueue <> io.destinationReadData
   io.sourceReadData <> reads.io.dequeue
 }
+
+class DmaControlConfig(addressWidth: Int) extends Bundle {
+  val enable = Bool()
+  val base = UInt(addressWidth.W)
+  val length = UInt(addressWidth.W)
+  val loop = Bool()
+  val clear = Bool()
+}
+
+class DmaControlStatus(addressWidth: Int) extends Bundle {
+  val done = Bool()
+  val busy = Bool()
+  val offset = UInt(addressWidth.W)
+}
+
+/**
+  * Coherent DMA control/status clock-domain crossing. Configuration updates
+  * and status observations cross as atomic snapshots rather than separately
+  * synchronized fields. `destinationClear` is reconstructed as a one-cycle
+  * pulse when a configuration snapshot is consumed.
+  */
+class DmaControlCdc(addressWidth: Int, depth: Int = 4) extends RawModule {
+  require(addressWidth >= 1)
+  require(depth >= 4 && (depth & (depth - 1)) == 0)
+
+  val io = IO(new Bundle {
+    val sourceClock = Input(Clock())
+    val sourceReset = Input(AsyncReset())
+    val destinationClock = Input(Clock())
+    val destinationReset = Input(AsyncReset())
+    val sourceUpdate = Flipped(Decoupled(new DmaControlConfig(addressWidth)))
+    val sourceStatus = Decoupled(new DmaControlStatus(addressWidth))
+    val destinationEnable = Output(Bool())
+    val destinationBase = Output(UInt(addressWidth.W))
+    val destinationLength = Output(UInt(addressWidth.W))
+    val destinationLoop = Output(Bool())
+    val destinationClear = Output(Bool())
+    val destinationDone = Input(Bool())
+    val destinationBusy = Input(Bool())
+    val destinationOffset = Input(UInt(addressWidth.W))
+  })
+
+  private val updates = Module(new AsyncQueue(new DmaControlConfig(addressWidth), depth))
+  updates.io.enqueueClock := io.sourceClock
+  updates.io.enqueueReset := io.sourceReset
+  updates.io.dequeueClock := io.destinationClock
+  updates.io.dequeueReset := io.destinationReset
+  updates.io.enqueue <> io.sourceUpdate
+  updates.io.dequeue.ready := true.B
+
+  private val enable = withClockAndReset(io.destinationClock, io.destinationReset) {
+    RegInit(false.B)
+  }
+  private val base = withClockAndReset(io.destinationClock, io.destinationReset) {
+    RegInit(0.U(addressWidth.W))
+  }
+  private val length = withClockAndReset(io.destinationClock, io.destinationReset) {
+    RegInit(0.U(addressWidth.W))
+  }
+  private val loop = withClockAndReset(io.destinationClock, io.destinationReset) {
+    RegInit(false.B)
+  }
+  private val clear = withClockAndReset(io.destinationClock, io.destinationReset) {
+    RegInit(false.B)
+  }
+  withClockAndReset(io.destinationClock, io.destinationReset) {
+    clear := false.B
+    when(updates.io.dequeue.fire) {
+      enable := updates.io.dequeue.bits.enable
+      base := updates.io.dequeue.bits.base
+      length := updates.io.dequeue.bits.length
+      loop := updates.io.dequeue.bits.loop
+      clear := updates.io.dequeue.bits.clear
+    }
+  }
+  io.destinationEnable := enable
+  io.destinationBase := base
+  io.destinationLength := length
+  io.destinationLoop := loop
+  io.destinationClear := clear
+
+  private val statuses = Module(new AsyncQueue(new DmaControlStatus(addressWidth), depth))
+  statuses.io.enqueueClock := io.destinationClock
+  statuses.io.enqueueReset := io.destinationReset
+  statuses.io.dequeueClock := io.sourceClock
+  statuses.io.dequeueReset := io.sourceReset
+  io.sourceStatus <> statuses.io.dequeue
+
+  private val currentStatus = Wire(new DmaControlStatus(addressWidth))
+  currentStatus.done := io.destinationDone
+  currentStatus.busy := io.destinationBusy
+  currentStatus.offset := io.destinationOffset
+  private val lastStatus = withClockAndReset(io.destinationClock, io.destinationReset) {
+    RegInit(0.U.asTypeOf(new DmaControlStatus(addressWidth)))
+  }
+  private val pendingStatus = withClockAndReset(io.destinationClock, io.destinationReset) {
+    Reg(new DmaControlStatus(addressWidth))
+  }
+  private val pendingValid = withClockAndReset(io.destinationClock, io.destinationReset) {
+    RegInit(false.B)
+  }
+  statuses.io.enqueue.valid := pendingValid
+  statuses.io.enqueue.bits := pendingStatus
+  withClockAndReset(io.destinationClock, io.destinationReset) {
+    when(!pendingValid && currentStatus.asUInt =/= lastStatus.asUInt) {
+      pendingStatus := currentStatus
+      pendingValid := true.B
+    }
+    when(statuses.io.enqueue.fire) {
+      lastStatus := pendingStatus
+      pendingValid := false.B
+    }
+  }
+}

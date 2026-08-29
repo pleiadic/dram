@@ -74,6 +74,46 @@ class NativePortCdcHarness extends Module {
   io.sourceReadData <> cdc.io.sourceReadData
 }
 
+class DmaControlCdcHarness extends Module {
+  val io = IO(new Bundle {
+    val update = Flipped(chisel3.util.Decoupled(new DmaControlConfig(12)))
+    val status = chisel3.util.Decoupled(new DmaControlStatus(12))
+    val destinationEnable = Output(Bool())
+    val destinationBase = Output(UInt(12.W))
+    val destinationLength = Output(UInt(12.W))
+    val destinationLoop = Output(Bool())
+    val destinationClear = Output(Bool())
+    val destinationDone = Input(Bool())
+    val destinationBusy = Input(Bool())
+    val destinationOffset = Input(UInt(12.W))
+  })
+
+  private val destinationClockLevel = RegInit(false.B)
+  private val divider = RegInit(0.U(2.W))
+  when(divider === 2.U) {
+    divider := 0.U
+    destinationClockLevel := !destinationClockLevel
+  }.otherwise {
+    divider := divider + 1.U
+  }
+
+  private val cdc = Module(new DmaControlCdc(addressWidth = 12, depth = 4))
+  cdc.io.sourceClock := clock
+  cdc.io.sourceReset := reset.asAsyncReset
+  cdc.io.destinationClock := destinationClockLevel.asClock
+  cdc.io.destinationReset := reset.asAsyncReset
+  cdc.io.sourceUpdate <> io.update
+  io.status <> cdc.io.sourceStatus
+  io.destinationEnable := cdc.io.destinationEnable
+  io.destinationBase := cdc.io.destinationBase
+  io.destinationLength := cdc.io.destinationLength
+  io.destinationLoop := cdc.io.destinationLoop
+  io.destinationClear := cdc.io.destinationClear
+  cdc.io.destinationDone := io.destinationDone
+  cdc.io.destinationBusy := io.destinationBusy
+  cdc.io.destinationOffset := io.destinationOffset
+}
+
 class AsyncQueueSpec extends AnyFlatSpec with ChiselScalatestTester {
   private val verilator = Seq(VerilatorBackendAnnotation,
     // chiseltest 6's JNA harness uses Verilator's pre-5.050 WData alias.
@@ -155,6 +195,102 @@ class AsyncQueueSpec extends AnyFlatSpec with ChiselScalatestTester {
       dut.io.sourceReadData.bits.data.expect("h13579bdf".U)
       dut.io.sourceReadData.ready.poke(true.B)
       dut.clock.step()
+    }
+  }
+
+  it should "cross coherent DMA configuration and backpressured status snapshots" in {
+    test(new DmaControlCdcHarness).withAnnotations(verilator) { dut =>
+      dut.io.update.valid.poke(false.B)
+      dut.io.update.bits.enable.poke(false.B)
+      dut.io.update.bits.base.poke(0.U)
+      dut.io.update.bits.length.poke(0.U)
+      dut.io.update.bits.loop.poke(false.B)
+      dut.io.update.bits.clear.poke(false.B)
+      dut.io.status.ready.poke(false.B)
+      dut.io.destinationDone.poke(false.B)
+      dut.io.destinationBusy.poke(false.B)
+      dut.io.destinationOffset.poke(0.U)
+      dut.reset.poke(true.B)
+      dut.clock.step(4)
+      dut.reset.poke(false.B)
+
+      def send(enable: Boolean, base: Int, length: Int,
+          loop: Boolean, clear: Boolean): Unit = {
+        dut.io.update.bits.enable.poke(enable.B)
+        dut.io.update.bits.base.poke(base.U)
+        dut.io.update.bits.length.poke(length.U)
+        dut.io.update.bits.loop.poke(loop.B)
+        dut.io.update.bits.clear.poke(clear.B)
+        dut.io.update.valid.poke(true.B)
+        while (!dut.io.update.ready.peek().litToBoolean) dut.clock.step()
+        dut.clock.step()
+        dut.io.update.valid.poke(false.B)
+      }
+
+      send(enable = true, base = 0x123, length = 0x45,
+        loop = true, clear = true)
+      var sawClear = false
+      var wait = 0
+      while ((dut.io.destinationBase.peek().litValue != 0x123 || !sawClear) && wait < 80) {
+        sawClear ||= dut.io.destinationClear.peek().litToBoolean
+        dut.clock.step()
+        wait += 1
+      }
+      assert(wait < 80 && sawClear)
+      dut.io.destinationEnable.expect(true.B)
+      dut.io.destinationBase.expect("h123".U)
+      dut.io.destinationLength.expect("h045".U)
+      dut.io.destinationLoop.expect(true.B)
+
+      dut.io.destinationBusy.poke(true.B)
+      dut.io.destinationOffset.poke("h012".U)
+      wait = 0
+      while (!dut.io.status.valid.peek().litToBoolean && wait < 100) {
+        dut.clock.step()
+        wait += 1
+      }
+      assert(wait < 100)
+      dut.io.status.bits.done.expect(false.B)
+      dut.io.status.bits.busy.expect(true.B)
+      dut.io.status.bits.offset.expect("h012".U)
+
+      // A queued status snapshot must remain stable while the source stalls,
+      // even as all destination fields change together.
+      dut.io.destinationDone.poke(true.B)
+      dut.io.destinationBusy.poke(false.B)
+      dut.io.destinationOffset.poke("h234".U)
+      dut.clock.step(12)
+      dut.io.status.bits.done.expect(false.B)
+      dut.io.status.bits.busy.expect(true.B)
+      dut.io.status.bits.offset.expect("h012".U)
+      dut.io.status.ready.poke(true.B)
+      dut.clock.step()
+
+      wait = 0
+      var sawFinal = false
+      while (!sawFinal && wait < 120) {
+        if (dut.io.status.valid.peek().litToBoolean) {
+          sawFinal = dut.io.status.bits.done.peek().litToBoolean &&
+            !dut.io.status.bits.busy.peek().litToBoolean &&
+            dut.io.status.bits.offset.peek().litValue == 0x234
+        }
+        dut.clock.step()
+        wait += 1
+      }
+      assert(sawFinal)
+
+      send(enable = false, base = 0x321, length = 7,
+        loop = false, clear = false)
+      wait = 0
+      while (dut.io.destinationBase.peek().litValue != 0x321 && wait < 80) {
+        dut.clock.step()
+        wait += 1
+      }
+      assert(wait < 80)
+      dut.io.destinationEnable.expect(false.B)
+      dut.io.destinationBase.expect("h321".U)
+      dut.io.destinationLength.expect(7.U)
+      dut.io.destinationLoop.expect(false.B)
     }
   }
 
