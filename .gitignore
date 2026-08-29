@@ -5,3 +5,4 @@ target/
 test_run_dir/
 __pycache__/
 *.pyc
+dev_docs/
