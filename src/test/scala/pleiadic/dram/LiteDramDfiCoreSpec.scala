@@ -1,6 +1,7 @@
 package pleiadic.dram
 
 import chisel3._
+import chisel3.util.UIntToOH
 import chiseltest._
 import org.scalatest.flatspec.AnyFlatSpec
 import scala.collection.mutable
@@ -52,6 +53,13 @@ class LiteDramDfiCoreMultiHarness(config: DramConfig, masterCount: Int)
     val protocolError = Output(Bool())
     val errors = Output(UInt(32.W))
     val refreshes = Output(UInt(16.W))
+    val activates = Output(UInt(16.W))
+    val precharges = Output(UInt(16.W))
+    val reads = Output(UInt(16.W))
+    val writes = Output(UInt(16.W))
+    val rankSeen = Output(UInt(config.nranks.W))
+    val bankSeen = Output(UInt(config.bankCount.W))
+    val phaseSeen = Output(UInt(config.nPhases.W))
   })
 
   private val core = Module(new LiteDramDfiCore(config, masterCount))
@@ -82,6 +90,53 @@ class LiteDramDfiCoreMultiHarness(config: DramConfig, masterCount: Int)
   private val refreshes = RegInit(0.U(16.W))
   when(refresh && !refreshes.andR) { refreshes := refreshes + 1.U }
   io.refreshes := refreshes
+
+  private def countWhen(condition: Bool): UInt = {
+    val counter = RegInit(0.U(16.W))
+    when(condition && !counter.andR) { counter := counter + 1.U }
+    counter
+  }
+  private val selected = core.io.dfi.phases.map(phase => !phase.csN.asUInt.andR)
+  private val activates = core.io.dfi.phases.zip(selected).map { case (phase, active) =>
+    active && !phase.rasN && phase.casN && phase.weN
+  }
+  private val precharges = core.io.dfi.phases.zip(selected).map { case (phase, active) =>
+    active && !phase.rasN && phase.casN && !phase.weN
+  }
+  private val reads = core.io.dfi.phases.zip(selected).map { case (phase, active) =>
+    active && phase.rasN && !phase.casN && phase.weN
+  }
+  private val writes = core.io.dfi.phases.zip(selected).map { case (phase, active) =>
+    active && phase.rasN && !phase.casN && !phase.weN
+  }
+  io.activates := countWhen(activates.reduce(_ || _))
+  io.precharges := countWhen(precharges.reduce(_ || _))
+  io.reads := countWhen(reads.reduce(_ || _))
+  io.writes := countWhen(writes.reduce(_ || _))
+
+  private val rankSeen = RegInit(0.U(config.nranks.W))
+  private val bankSeen = RegInit(0.U(config.bankCount.W))
+  private val phaseSeen = RegInit(0.U(config.nPhases.W))
+  private val command = core.io.dfi.phases.zip(selected).map { case (phase, active) =>
+    active && (!phase.rasN || !phase.casN || !phase.weN)
+  }
+  when(command.reduce(_ || _)) {
+    val ranks = core.io.dfi.phases.zip(command).map { case (phase, active) =>
+      Mux(active, (~phase.csN.asUInt)(config.nranks - 1, 0), 0.U)
+    }.reduce(_ | _)
+    val banks = core.io.dfi.phases.zip(command).map { case (phase, active) =>
+      Mux(active, UIntToOH(phase.bank, config.bankCount), 0.U)
+    }.reduce(_ | _)
+    val phases = command.zipWithIndex.map { case (active, phaseIndex) =>
+      Mux(active, (1.U(config.nPhases.W) << phaseIndex), 0.U)
+    }.reduce(_ | _)
+    rankSeen := rankSeen | ranks
+    bankSeen := bankSeen | banks
+    phaseSeen := phaseSeen | phases
+  }
+  io.rankSeen := rankSeen
+  io.bankSeen := bankSeen
+  io.phaseSeen := phaseSeen
 }
 
 class LiteDramDfiCoreSpec extends AnyFlatSpec with ChiselScalatestTester {
@@ -200,6 +255,13 @@ class LiteDramDfiCoreSpec extends AnyFlatSpec with ChiselScalatestTester {
     val systemConfig = config.copy(timing = config.timing.copy(tRefi = 64))
     test(new LiteDramDfiCoreMultiHarness(systemConfig, masterCount)) { dut =>
       val random = new Random(0x53595354454dL)
+      val coverage = new FunctionalCoverageBins("complete-dfi-system", Seq(
+        "master_0_write", "master_1_write", "master_2_write",
+        "master_0_read", "master_1_read", "master_2_read",
+        "simultaneous_master_commands", "command_backpressure",
+        "read_data_backpressure", "activate",
+        "precharge", "dfi_read", "dfi_write", "refresh", "all_ranks",
+        "all_banks", "all_phases", "scoreboards_drained", "protocol_clean"))
       val writes = Array.tabulate(masterCount) { master =>
         (0 until 48).filter(_ % masterCount == master).map { address =>
           address -> (BigInt(master + 1) << 28 | BigInt(address * 0x10201))
@@ -233,12 +295,20 @@ class LiteDramDfiCoreSpec extends AnyFlatSpec with ChiselScalatestTester {
             port.writeData.valid.poke(false.B)
           }
         }
+        coverage.hitWhen("simultaneous_master_commands",
+          dut.io.masters.count(_.command.valid.peek().litToBoolean) > 1)
         for (master <- 0 until masterCount) {
           val port = dut.io.masters(master)
           if (port.command.valid.peek().litToBoolean &&
-              port.command.ready.peek().litToBoolean) commandAccepted(master) = true
+              port.command.ready.peek().litToBoolean) {
+            commandAccepted(master) = true
+            coverage.hit(s"master_${master}_write")
+          }
           if (port.writeData.valid.peek().litToBoolean &&
               port.writeData.ready.peek().litToBoolean) dataAccepted(master) = true
+          coverage.hitWhen("command_backpressure",
+            port.command.valid.peek().litToBoolean &&
+              !port.command.ready.peek().litToBoolean)
         }
         dut.clock.step()
         for (master <- 0 until masterCount) {
@@ -284,6 +354,7 @@ class LiteDramDfiCoreSpec extends AnyFlatSpec with ChiselScalatestTester {
               port.command.ready.peek().litToBoolean) {
             expected(master).enqueue(reads(master)(readCommandIndex(master))._2)
             readCommandIndex(master) += 1
+            coverage.hit(s"master_${master}_read")
           }
           if (port.readData.valid.peek().litToBoolean) {
             assert(expected(master).nonEmpty,
@@ -294,6 +365,9 @@ class LiteDramDfiCoreSpec extends AnyFlatSpec with ChiselScalatestTester {
               completed(master) += 1
             }
           }
+          coverage.hitWhen("read_data_backpressure",
+            port.readData.valid.peek().litToBoolean &&
+              !port.readData.ready.peek().litToBoolean)
         }
         dut.clock.step()
         cycles += 1
@@ -304,6 +378,22 @@ class LiteDramDfiCoreSpec extends AnyFlatSpec with ChiselScalatestTester {
       assert(dut.io.refreshes.peek().litValue > 0, "system run issued no refreshes")
       dut.io.protocolError.expect(false.B)
       dut.io.errors.expect(0.U)
+      coverage.hitWhen("activate", dut.io.activates.peek().litValue > 0)
+      coverage.hitWhen("precharge", dut.io.precharges.peek().litValue > 0)
+      coverage.hitWhen("dfi_read", dut.io.reads.peek().litValue > 0)
+      coverage.hitWhen("dfi_write", dut.io.writes.peek().litValue > 0)
+      coverage.hitWhen("refresh", dut.io.refreshes.peek().litValue > 0)
+      coverage.hitWhen("all_ranks",
+        dut.io.rankSeen.peek().litValue == (BigInt(1) << systemConfig.nranks) - 1)
+      coverage.hitWhen("all_banks",
+        dut.io.bankSeen.peek().litValue == (BigInt(1) << systemConfig.bankCount) - 1)
+      coverage.hitWhen("all_phases",
+        dut.io.phaseSeen.peek().litValue == (BigInt(1) << systemConfig.nPhases) - 1)
+      coverage.hitWhen("scoreboards_drained",
+        expected.forall(_.isEmpty) && completed.forall(_ == 16))
+      coverage.hitWhen("protocol_clean",
+        !dut.io.protocolError.peek().litToBoolean && dut.io.errors.peek().litValue == 0)
+      coverage.requireComplete()
     }
   }
 }

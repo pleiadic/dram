@@ -189,6 +189,11 @@ class DfiTimingCheckerSpec extends AnyFlatSpec with ChiselScalatestTester {
       var time = 0L
       var expectedViolations = 0L
       val random = new Random(0x54494d45)
+      val coverage = new FunctionalCoverageBins("dfi-timing-checker", Seq(
+        "precharge", "refresh", "activate", "read", "write", "zqcs",
+        "all_bank_command", "bank_0", "bank_1", "phase_0", "phase_1",
+        "phase_2", "phase_3", "simultaneous_commands", "checking_enabled",
+        "checking_disabled", "legal_cycle", "violation_cycle", "clear_count"))
 
       dut.io.enable.poke(true.B)
       dut.io.clear.poke(false.B)
@@ -200,6 +205,9 @@ class DfiTimingCheckerSpec extends AnyFlatSpec with ChiselScalatestTester {
         val clear = cycle > 0 && cycle % 173 == 0
         dut.io.enable.poke(enabled.B)
         dut.io.clear.poke(clear.B)
+        coverage.hitWhen("checking_enabled", enabled)
+        coverage.hitWhen("checking_disabled", !enabled)
+        coverage.hitWhen("clear_count", clear)
         val issued = Array.fill[Option[(Int, Int, Boolean)]](randomCfg.nPhases)(None)
 
         for (phaseIndex <- 0 until randomCfg.nPhases if random.nextInt(100) < 42) {
@@ -218,7 +226,20 @@ class DfiTimingCheckerSpec extends AnyFlatSpec with ChiselScalatestTester {
           if (allBanks && kind == pre)
             dut.io.dfi.phases(phaseIndex).address.poke((BigInt(1) << 10).U)
           issued(phaseIndex) = Some((kind, bank, allBanks))
+          val commandBin = kind match {
+            case `pre` => "precharge"
+            case `refresh` => "refresh"
+            case `activate` => "activate"
+            case `read` => "read"
+            case `write` => "write"
+            case `zq` => "zqcs"
+          }
+          coverage.hit(commandBin)
+          coverage.hit(s"bank_$bank")
+          coverage.hit(s"phase_$phaseIndex")
+          coverage.hitWhen("all_bank_command", allBanks)
         }
+        coverage.hitWhen("simultaneous_commands", issued.count(_.nonEmpty) > 1)
 
         var expectedViolation = false
         for (phaseIndex <- 0 until randomCfg.nPhases) {
@@ -247,12 +268,15 @@ class DfiTimingCheckerSpec extends AnyFlatSpec with ChiselScalatestTester {
         }
 
         dut.io.violation.expect(expectedViolation.B)
+        coverage.hitWhen("violation_cycle", expectedViolation)
+        coverage.hitWhen("legal_cycle", !expectedViolation)
         dut.clock.step()
         expectedViolations = if (clear) 0L
           else if (expectedViolation) expectedViolations + 1L else expectedViolations
         dut.io.violations.expect(expectedViolations.U)
         time += randomCfg.nPhases
       }
+      coverage.requireComplete()
     }
   }
 }

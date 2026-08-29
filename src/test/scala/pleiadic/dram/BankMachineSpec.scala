@@ -282,6 +282,11 @@ class BankMachineSpec extends AnyFlatSpec with ChiselScalatestTester {
       var refreshGranted = false
       var refreshHold = 0
       var cycle = 0
+      val coverage = new FunctionalCoverageBins("bank-machine", Seq(
+        "read_request", "write_request", "activate", "read",
+        "write", "auto_precharge", "same_row_lookahead", "command_stall",
+        "request_backpressure", "refresh_request", "refresh_grant",
+        "completion", "lock_asserted", "lock_released"))
 
       dut.io.request.valid.poke(false.B)
       dut.io.refreshRequest.poke(false.B)
@@ -312,6 +317,9 @@ class BankMachineSpec extends AnyFlatSpec with ChiselScalatestTester {
         dut.io.command.ready.poke(ready.B)
 
         dut.io.lock.expect(expected.nonEmpty.B)
+        coverage.hitWhen("lock_asserted", expected.nonEmpty)
+        coverage.hitWhen("lock_released", expected.isEmpty)
+        coverage.hitWhen("refresh_request", refreshActive)
         val commandValid = dut.io.command.valid.peek().litToBoolean
         val payload = if (commandValid) Some(Payload(
           dut.io.command.bits.command.peek().litValue,
@@ -334,6 +342,7 @@ class BankMachineSpec extends AnyFlatSpec with ChiselScalatestTester {
             s"cycle $cycle selected rank/bank ${command.rank}/${command.bank}")
           command.command match {
             case value if value == DramCommandType.activate.litValue =>
+              coverage.hit("activate")
               assert(openRow.isEmpty, s"cycle $cycle activated with row $openRow open")
               assert(command.row == head.row, s"cycle $cycle activated wrong row")
             case value if value == DramCommandType.precharge.litValue =>
@@ -341,6 +350,7 @@ class BankMachineSpec extends AnyFlatSpec with ChiselScalatestTester {
                 s"cycle $cycle issued unnecessary precharge for row $openRow")
             case value if value == DramCommandType.read.litValue ||
                 value == DramCommandType.write.litValue =>
+              coverage.hit(if (value == DramCommandType.write.litValue) "write" else "read")
               assert(openRow.contains(head.row),
                 s"cycle $cycle accessed row ${head.row} with $openRow open")
               assert(command.row == head.row && command.column == head.column,
@@ -351,6 +361,9 @@ class BankMachineSpec extends AnyFlatSpec with ChiselScalatestTester {
                 val expectedAuto = expected.size > 1 && expected(1).row != head.row
                 assert(command.autoPrecharge == expectedAuto,
                   s"cycle $cycle auto-precharge=${command.autoPrecharge}, expected=$expectedAuto")
+                coverage.hitWhen("auto_precharge", command.autoPrecharge)
+                coverage.hitWhen("same_row_lookahead",
+                  expected.size > 1 && expected(1).row == head.row)
               }
             case other => fail(s"cycle $cycle emitted unknown command $other")
           }
@@ -362,9 +375,11 @@ class BankMachineSpec extends AnyFlatSpec with ChiselScalatestTester {
             command.command == DramCommandType.write.litValue)
         dut.io.completion.valid.expect(columnFire.B)
         if (columnFire) {
+          coverage.hit("completion")
           dut.io.completion.bits.write.expect(expected.head.write.B)
         }
         if (dut.io.refreshGrant.peek().litToBoolean) {
+          coverage.hit("refresh_grant")
           assert(!commandValid, s"cycle $cycle granted refresh with a command valid")
           if (!refreshGranted) {
             refreshGranted = true
@@ -408,10 +423,14 @@ class BankMachineSpec extends AnyFlatSpec with ChiselScalatestTester {
 
         val requestFire = pending.nonEmpty && dut.io.request.ready.peek().litToBoolean
         if (requestFire) {
+          coverage.hit(if (pending.get.write) "write_request" else "read_request")
           expected += pending.get
           pending = None
           accepted += 1
         }
+        coverage.hitWhen("request_backpressure",
+          pending.nonEmpty && !dut.io.request.ready.peek().litToBoolean)
+        coverage.hitWhen("command_stall", commandValid && !ready)
         if (dut.io.refreshGrant.peek().litToBoolean) openRow = None
         stalled = if (commandValid && !ready) payload else None
 
@@ -428,6 +447,7 @@ class BankMachineSpec extends AnyFlatSpec with ChiselScalatestTester {
 
       assert(cycle < 8000, s"random run timed out with ${expected.size} queued requests")
       assert(accepted == targetRequests)
+      coverage.requireComplete()
       assert(completed == targetRequests)
       assert(expected.isEmpty && pending.isEmpty)
       dut.io.lock.expect(false.B)

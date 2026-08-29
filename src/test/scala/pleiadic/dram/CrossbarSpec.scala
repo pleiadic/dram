@@ -86,6 +86,11 @@ class CrossbarSpec extends AnyFlatSpec with ChiselScalatestTester {
       var readInput = 0
       var consumed = 0
       var cycle = 0
+      val coverage = new FunctionalCoverageBins("data-crossbar", Seq(
+        "master_0", "master_1", "master_2", "master_3", "bank_0", "bank_1",
+        "bank_2", "bank_3", "read_completion", "write_completion",
+        "multiple_outstanding", "write_output_stall", "read_output_stall",
+        "write_input_stall", "completion_and_consume", "queue_drained"))
 
       dut.io.bankCompletions.foreach(_.valid.poke(false.B))
       dut.io.bankOwnerValid.foreach(_.poke(true.B))
@@ -121,6 +126,18 @@ class CrossbarSpec extends AnyFlatSpec with ChiselScalatestTester {
           dut.io.writeData.bits.data.expect(outstanding.head.data.U)
           dut.io.writeData.bits.byteEnable.expect("hf".U)
         }
+        coverage.hitWhen("multiple_outstanding", outstanding.size > 1)
+        coverage.hitWhen("write_output_stall",
+          dut.io.writeData.valid.peek().litToBoolean &&
+            !dut.io.writeData.ready.peek().litToBoolean)
+        coverage.hitWhen("read_output_stall", (0 until 4).exists { master =>
+          dut.io.masters(master).readData.valid.peek().litToBoolean &&
+            !dut.io.masters(master).readData.ready.peek().litToBoolean
+        })
+        coverage.hitWhen("write_input_stall", (0 until 4).exists { master =>
+          dut.io.masters(master).writeData.valid.peek().litToBoolean &&
+            !dut.io.masters(master).writeData.ready.peek().litToBoolean
+        })
         for (master <- 0 until 4) {
           if (dut.io.masters(master).readData.valid.peek().litToBoolean) {
             assert(outstanding.nonEmpty && !outstanding.head.write &&
@@ -142,6 +159,8 @@ class CrossbarSpec extends AnyFlatSpec with ChiselScalatestTester {
         }
         val readInputFire = readInput < reads.size &&
           dut.io.readData.ready.peek().litToBoolean
+        coverage.hitWhen("completion_and_consume",
+          issueCompletion && (writeOutputFire || readOutputFire))
         assert(readOutputFire == readInputFire,
           s"cycle $cycle read input/output handshakes diverged")
 
@@ -153,6 +172,10 @@ class CrossbarSpec extends AnyFlatSpec with ChiselScalatestTester {
         }
         if (readInputFire) readInput += 1
         if (issueCompletion) {
+          val operation = operations(completion)
+          coverage.hit(s"master_${operation.master}")
+          coverage.hit(s"bank_${operation.bank}")
+          coverage.hit(if (operation.write) "write_completion" else "read_completion")
           outstanding += operations(completion)
           completion += 1
         }
@@ -164,6 +187,8 @@ class CrossbarSpec extends AnyFlatSpec with ChiselScalatestTester {
       assert(readInput == reads.size)
       for (master <- 0 until 4)
         assert(writeInputs(master) == writesByMaster(master).size)
+      coverage.hitWhen("queue_drained", outstanding.isEmpty)
+      coverage.requireComplete()
     }
   }
 

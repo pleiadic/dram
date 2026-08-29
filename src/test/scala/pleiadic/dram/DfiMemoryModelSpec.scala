@@ -194,6 +194,13 @@ class DfiMemoryModelSpec extends AnyFlatSpec with ChiselScalatestTester {
       val random = new Random(0x4d454d4fL)
       val open = Array.fill(config.bankCount)(false)
       var expectedErrors = 0L
+      val coverage = new FunctionalCoverageBins("dfi-memory-model", Seq(
+        "selected_nop", "deselected_command", "activate", "precharge",
+        "precharge_all", "refresh", "read", "write", "bank_0", "bank_1",
+        "multi_command_cycle", "multi_read_conflict", "multi_write_conflict",
+        "read_write_conflict", "closed_bank_column", "duplicate_activate",
+        "refresh_with_open_bank", "write_data_aligned", "write_data_misaligned",
+        "protocol_legal", "protocol_error", "clear_errors"))
 
       case class Issued(command: Int, selected: Boolean, bank: Int,
           allBanks: Boolean, writeDataEnable: Boolean)
@@ -252,6 +259,29 @@ class DfiMemoryModelSpec extends AnyFlatSpec with ChiselScalatestTester {
         val refreshes = commands.filter(_.command == 3)
         val reads = commands.filter(_.command == 4)
         val writes = commands.filter(_.command == 5)
+        coverage.hitWhen("selected_nop", commands.exists(_.command == 0))
+        coverage.hitWhen("deselected_command", issued.exists(value => !value.selected))
+        coverage.hitWhen("activate", activates.nonEmpty)
+        coverage.hitWhen("precharge", precharges.exists(value => !value.allBanks))
+        coverage.hitWhen("precharge_all", precharges.exists(_.allBanks))
+        coverage.hitWhen("refresh", refreshes.nonEmpty)
+        coverage.hitWhen("read", reads.nonEmpty)
+        coverage.hitWhen("write", writes.nonEmpty)
+        coverage.hitWhen("bank_0", commands.exists(_.bank == 0))
+        coverage.hitWhen("bank_1", commands.exists(_.bank == 1))
+        coverage.hitWhen("multi_command_cycle", commands.size > 1)
+        coverage.hitWhen("multi_read_conflict", reads.size > 1)
+        coverage.hitWhen("multi_write_conflict", writes.size > 1)
+        coverage.hitWhen("read_write_conflict", reads.nonEmpty && writes.nonEmpty)
+        coverage.hitWhen("closed_bank_column",
+          reads.exists(value => !open(value.bank)) ||
+            writes.exists(value => !open(value.bank)))
+        coverage.hitWhen("duplicate_activate",
+          activates.exists(value => open(value.bank)))
+        coverage.hitWhen("refresh_with_open_bank",
+          refreshes.nonEmpty && open.contains(true))
+        coverage.hitWhen("clear_errors", clear)
+
         var error = activates.exists(value => open(value.bank)) ||
           precharges.exists(value => !value.allBanks && !open(value.bank)) ||
           (refreshes.nonEmpty && open.contains(true)) ||
@@ -261,7 +291,11 @@ class DfiMemoryModelSpec extends AnyFlatSpec with ChiselScalatestTester {
           writes.headOption.exists(value => !open(value.bank))
         val validWrite = writes.headOption.exists(value => open(value.bank))
         val writeDataEnable = issued.exists(_.writeDataEnable)
+        coverage.hitWhen("write_data_aligned", validWrite && writeDataEnable)
+        coverage.hitWhen("write_data_misaligned", writeDataEnable != validWrite)
         error ||= writeDataEnable != validWrite
+        coverage.hitWhen("protocol_error", error)
+        coverage.hitWhen("protocol_legal", !error)
 
         dut.io.protocolError.expect(error.B)
         dut.clock.step()
@@ -283,6 +317,7 @@ class DfiMemoryModelSpec extends AnyFlatSpec with ChiselScalatestTester {
         }.foldLeft(BigInt(0))(_ | _)
         dut.io.openBanks.expect(expectedOpen.U)
       }
+      coverage.requireComplete()
     }
   }
 }

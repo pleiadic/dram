@@ -5,7 +5,9 @@ This directory is an in-progress Chisel reconstruction of
 acceptance criteria are in [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md). Release
 status is summarized in [SUPPORT_MATRIX.md](SUPPORT_MATRIX.md); integration
 and compatibility details are in [MIGRATION_GUIDE.md](MIGRATION_GUIDE.md) and
-[KNOWN_DIFFERENCES.md](KNOWN_DIFFERENCES.md).
+[KNOWN_DIFFERENCES.md](KNOWN_DIFFERENCES.md). The executable requirement and
+event-bin methodology is documented in
+[FUNCTIONAL_COVERAGE.md](FUNCTIONAL_COVERAGE.md).
 
 The new synthesizable control path is decomposed into `BankMachine`,
 `Refresher`, `CommandChooser`, `Multiplexer`, `LiteDramController`, and

@@ -20,3 +20,5 @@ scalacOptions ++= Seq("-deprecation", "-feature", "-unchecked")
 // shared library on macOS. Keep the full hardware regression deterministic.
 Test / parallelExecution := false
 Test / fork := true
+Test / testOptions += Tests.Argument(
+  TestFrameworks.ScalaTest, "-u", "target/functional-coverage-results")
