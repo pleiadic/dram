@@ -1,13 +1,9 @@
 # Pleiadic Chisel DRAM
 
 This directory is an in-progress Chisel reconstruction of
-[LiteDRAM](../../litex/litedram). The detailed parity matrix and staged
-acceptance criteria are in [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md). Release
-status is summarized in [SUPPORT_MATRIX.md](SUPPORT_MATRIX.md); integration
-and compatibility details are in [MIGRATION_GUIDE.md](MIGRATION_GUIDE.md) and
-[KNOWN_DIFFERENCES.md](KNOWN_DIFFERENCES.md). The executable requirement and
-event-bin methodology is documented in
-[FUNCTIONAL_COVERAGE.md](FUNCTIONAL_COVERAGE.md).
+[LiteDRAM](../../litex/litedram). Local planning, migration, support, and
+verification notes belong under the ignored `dev_docs/` directory rather than
+the repository history.
 
 The new synthesizable control path is decomposed into `BankMachine`,
 `Refresher`, `CommandChooser`, `Multiplexer`, `LiteDramController`, and

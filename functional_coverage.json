@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "scope": "Supported behavior documented in SUPPORT_MATRIX.md",
+  "scope": "Supported behavior enumerated by this manifest",
   "excluded": [
     "RTL line, branch, expression, and toggle coverage",
     "Formal proof",
