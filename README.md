@@ -78,7 +78,8 @@ ChiselTest 6 requires a local `WData` compatibility define when used with
 Verilator 5.050 or newer; the define is scoped to the test C++ harness and does
 not alter generated RTL.
 
-Functional frontends now also include ordered Native DMA reader/writer engines,
+Functional frontends now also include ordered Native DMA reader/writer engines
+with contiguous CSR-style transfer control,
 a DRAM-backed ring FIFO with narrow-stream conversion and automatic bypass,
 incremental/PRBS and fixed-table BIST generation/checking, LiteX-compatible
 per-lane SEC-DED codecs, saturating ECC status counters, and a fixed-window

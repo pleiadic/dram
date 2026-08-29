@@ -94,3 +94,122 @@ class LiteDramDmaWriter(config: DramConfig, fifoDepth: Int = 16) extends Module 
   // descriptor used by higher-level address generators.
   dontTouch(io.request.bits.last)
 }
+
+/** CSR-style contiguous word-address sequencer shared by controlled DMAs. */
+private class DmaAddressSequencer(addressWidth: Int) extends Module {
+  require(addressWidth >= 1)
+  val io = IO(new Bundle {
+    val enable = Input(Bool())
+    val base = Input(UInt(addressWidth.W))
+    val length = Input(UInt(addressWidth.W))
+    val loop = Input(Bool())
+    val issue = Input(Bool())
+    val ready = Input(Bool())
+    val valid = Output(Bool())
+    val address = Output(UInt(addressWidth.W))
+    val last = Output(Bool())
+    val done = Output(Bool())
+    val offset = Output(UInt(addressWidth.W))
+  })
+
+  private val active = RegInit(false.B)
+  private val done = RegInit(false.B)
+  private val offset = RegInit(0.U(addressWidth.W))
+  io.valid := active && io.issue
+  io.address := io.base + offset
+  io.last := offset === io.length - 1.U
+  io.done := done
+  io.offset := offset
+
+  when(!io.enable) {
+    active := false.B
+    done := false.B
+    offset := 0.U
+  }.elsewhen(!active && !done) {
+    assert(io.length =/= 0.U, "DMA control length must be non-zero")
+    active := true.B
+    offset := 0.U
+  }.elsewhen(io.valid && io.ready) {
+    when(io.last) {
+      when(io.loop) {
+        offset := 0.U
+      }.otherwise {
+        active := false.B
+        done := true.B
+      }
+    }.otherwise {
+      offset := offset + 1.U
+    }
+  }
+}
+
+/** Native DMA reader with a LiteX CSR-style base/length/enable/loop frontend. */
+class LiteDramDmaReaderControl(config: DramConfig, fifoDepth: Int = 16) extends Module {
+  private val addressWidth = config.addressBits - config.byteOffsetBits
+  val io = IO(new Bundle {
+    val enable = Input(Bool())
+    val base = Input(UInt(addressWidth.W))
+    val length = Input(UInt(addressWidth.W))
+    val loop = Input(Bool())
+    val done = Output(Bool())
+    val offset = Output(UInt(addressWidth.W))
+    val data = Decoupled(new DmaReadData(config))
+    val nativeCommand = Decoupled(new NativeCommand(config))
+    val nativeReadData = Flipped(Decoupled(new NativeReadData(config)))
+  })
+
+  private val sequencer = Module(new DmaAddressSequencer(addressWidth))
+  private val reader = Module(new LiteDramDmaReader(config, fifoDepth))
+  sequencer.io.enable := io.enable
+  sequencer.io.base := io.base
+  sequencer.io.length := io.length
+  sequencer.io.loop := io.loop
+  sequencer.io.issue := true.B
+  sequencer.io.ready := reader.io.request.ready
+  reader.io.enable := io.enable
+  reader.io.request.valid := sequencer.io.valid
+  reader.io.request.bits.address := sequencer.io.address
+  reader.io.request.bits.last := sequencer.io.last
+  io.data <> reader.io.data
+  io.nativeCommand <> reader.io.nativeCommand
+  reader.io.nativeReadData <> io.nativeReadData
+  io.done := sequencer.io.done
+  io.offset := sequencer.io.offset
+}
+
+/** Native DMA writer with a LiteX CSR-style contiguous address frontend. */
+class LiteDramDmaWriterControl(config: DramConfig, fifoDepth: Int = 16) extends Module {
+  private val addressWidth = config.addressBits - config.byteOffsetBits
+  val io = IO(new Bundle {
+    val enable = Input(Bool())
+    val base = Input(UInt(addressWidth.W))
+    val length = Input(UInt(addressWidth.W))
+    val loop = Input(Bool())
+    val done = Output(Bool())
+    val offset = Output(UInt(addressWidth.W))
+    val input = Flipped(Decoupled(UInt(config.dataBits.W)))
+    val nativeCommand = Decoupled(new NativeCommand(config))
+    val nativeWriteData = Decoupled(new NativeWriteData(config))
+    val busy = Output(Bool())
+  })
+
+  private val sequencer = Module(new DmaAddressSequencer(addressWidth))
+  private val writer = Module(new LiteDramDmaWriter(config, fifoDepth))
+  sequencer.io.enable := io.enable
+  sequencer.io.base := io.base
+  sequencer.io.length := io.length
+  sequencer.io.loop := io.loop
+  sequencer.io.issue := io.input.valid
+  sequencer.io.ready := writer.io.request.ready
+  writer.io.request.valid := sequencer.io.valid
+  writer.io.request.bits.address := sequencer.io.address
+  writer.io.request.bits.data := io.input.bits
+  writer.io.request.bits.byteEnable := Fill(config.dataBits / 8, 1.U(1.W))
+  writer.io.request.bits.last := sequencer.io.last
+  io.input.ready := sequencer.io.valid && writer.io.request.ready
+  io.nativeCommand <> writer.io.nativeCommand
+  io.nativeWriteData <> writer.io.nativeWriteData
+  io.done := sequencer.io.done
+  io.offset := sequencer.io.offset
+  io.busy := io.enable && (writer.io.busy || !sequencer.io.done)
+}
