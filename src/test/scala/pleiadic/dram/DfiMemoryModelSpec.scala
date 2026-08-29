@@ -4,6 +4,7 @@ import chisel3._
 import chiseltest._
 import org.scalatest.flatspec.AnyFlatSpec
 import scala.language.reflectiveCalls
+import scala.util.Random
 
 class DfiMemoryModelSpec extends AnyFlatSpec with ChiselScalatestTester {
   private val config = DramConfig(addressBits = 8, dataBits = 32,
@@ -185,6 +186,103 @@ class DfiMemoryModelSpec extends AnyFlatSpec with ChiselScalatestTester {
       get(rank = 0, value = 0x1111)
       get(rank = 1, value = 0x2222)
       dut.io.errors.expect(0.U)
+    }
+  }
+
+  it should "match an independent protocol oracle over random multi-phase commands" in {
+    test(new DfiMemoryModel(config, writeLatency = 0)) { dut =>
+      val random = new Random(0x4d454d4fL)
+      val open = Array.fill(config.bankCount)(false)
+      var expectedErrors = 0L
+
+      case class Issued(command: Int, selected: Boolean, bank: Int,
+          allBanks: Boolean, writeDataEnable: Boolean)
+
+      def drive(phase: DfiPhase, issued: Issued): Unit = {
+        phase.address.poke((if (issued.allBanks) 1 << 10 else random.nextInt(4)).U)
+        phase.bank.poke(issued.bank.U)
+        phase.csN(0).poke((!issued.selected).B)
+        phase.rasN.poke(true.B)
+        phase.casN.poke(true.B)
+        phase.weN.poke(true.B)
+        phase.actN.poke(true.B)
+        issued.command match {
+          case 1 => phase.actN.poke(false.B)
+          case 2 =>
+            phase.rasN.poke(false.B)
+            phase.weN.poke(false.B)
+          case 3 =>
+            phase.rasN.poke(false.B)
+            phase.casN.poke(false.B)
+          case 4 => phase.casN.poke(false.B)
+          case 5 =>
+            phase.casN.poke(false.B)
+            phase.weN.poke(false.B)
+          case _ =>
+        }
+        phase.cke(0).poke(true.B)
+        phase.odt(0).poke(false.B)
+        phase.resetN.poke(true.B)
+        phase.rddataEn.poke(false.B)
+        phase.wrdataEn.poke(issued.writeDataEnable.B)
+        phase.wrdata.poke(random.nextInt(1 << config.dfiDataBits).U)
+        phase.wrdataMask.poke(random.nextInt(1 << (config.dfiDataBits / 8)).U)
+        phase.rddata.poke(0.U)
+        phase.rddataValid.poke(false.B)
+      }
+
+      for (cycle <- 0 until 600) {
+        val issued = Seq.fill(config.nPhases) {
+          val command = random.nextInt(6)
+          val selected = random.nextInt(5) != 0
+          val writeEnable = if (command == 5 && selected) random.nextInt(5) != 0
+            else random.nextInt(20) == 0
+          Issued(command, selected, random.nextInt(config.bankCount),
+            allBanks = command == 2 && random.nextBoolean(), writeEnable)
+        }
+        issued.zip(dut.io.dfi.phases).foreach { case (value, phase) =>
+          drive(phase, value)
+        }
+        val clear = cycle != 0 && cycle % 97 == 0
+        dut.io.clearErrors.poke(clear.B)
+
+        val commands = issued.filter(_.selected)
+        val activates = commands.filter(_.command == 1)
+        val precharges = commands.filter(_.command == 2)
+        val refreshes = commands.filter(_.command == 3)
+        val reads = commands.filter(_.command == 4)
+        val writes = commands.filter(_.command == 5)
+        var error = activates.exists(value => open(value.bank)) ||
+          precharges.exists(value => !value.allBanks && !open(value.bank)) ||
+          (refreshes.nonEmpty && open.contains(true)) ||
+          reads.size > 1 || writes.size > 1 ||
+          (reads.nonEmpty && writes.nonEmpty) ||
+          reads.headOption.exists(value => !open(value.bank)) ||
+          writes.headOption.exists(value => !open(value.bank))
+        val validWrite = writes.headOption.exists(value => open(value.bank))
+        val writeDataEnable = issued.exists(_.writeDataEnable)
+        error ||= writeDataEnable != validWrite
+
+        dut.io.protocolError.expect(error.B)
+        dut.clock.step()
+        if (clear) expectedErrors = 0
+        else if (error) expectedErrors += 1
+        dut.io.errors.expect(expectedErrors.U)
+
+        issued.foreach { value =>
+          if (value.selected) value.command match {
+            case 1 => open(value.bank) = true
+            case 2 =>
+              if (value.allBanks) java.util.Arrays.fill(open, false)
+              else open(value.bank) = false
+            case _ =>
+          }
+        }
+        val expectedOpen = open.zipWithIndex.collect {
+          case (true, bank) => BigInt(1) << bank
+        }.foldLeft(BigInt(0))(_ | _)
+        dut.io.openBanks.expect(expectedOpen.U)
+      }
     }
   }
 }

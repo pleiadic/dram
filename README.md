@@ -118,7 +118,9 @@ An independent DFI memory model decodes SDR through DDR4 command encodings,
 tracks open rows per rank/bank, combines and splits multi-phase data, applies
 byte masks, delays reads/writes, and reports invalid command sequencing. Large
 production geometries should be reduced when instantiating its explicit test
-memory.
+memory. A 600-cycle independent random oracle checks simultaneous phase
+commands, open-bank transitions, all-bank precharge, refresh, read/write
+collisions, write-data alignment, sticky error counting, and clearing.
 
 Portable command adapters translate legacy DFI encodings into LPDDR4 and
 LPDDR5 CA edge sequences or RPC parallel Request Packets. They cover mode
