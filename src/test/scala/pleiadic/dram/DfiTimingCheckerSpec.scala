@@ -4,6 +4,7 @@ import chisel3._
 import chiseltest._
 import org.scalatest.flatspec.AnyFlatSpec
 import scala.language.reflectiveCalls
+import scala.util.Random
 
 class DfiTimingCheckerSpec extends AnyFlatSpec with ChiselScalatestTester {
   private val timing = DramTiming(tRcd = 2, tRp = 2, tRas = 4, tRc = 6,
@@ -152,6 +153,106 @@ class DfiTimingCheckerSpec extends AnyFlatSpec with ChiselScalatestTester {
       dut.clock.step(2)
       command(dut, bank = 1, rasN = false, casN = true, weN = true)
       dut.io.violation.expect(false.B)
+    }
+  }
+
+  it should "match an independent phase-granular oracle over a long random stream" in {
+    val randomTiming = timing.copy(tZqcs = Some(3), tRefi = 1000)
+    val randomCfg = cfg.copy(nPhases = 4, timing = randomTiming)
+    test(new DfiTimingChecker(randomCfg)) { dut =>
+      val pre = 0
+      val refresh = 1
+      val activate = 2
+      val read = 3
+      val write = 4
+      val zq = 5
+      case class Rule(previous: Int, current: Int, delay: Int)
+      val rules = Seq(
+        Rule(pre, activate, randomTiming.tRp),
+        Rule(pre, refresh, randomTiming.tRp),
+        Rule(activate, write, randomTiming.tRcd),
+        Rule(activate, read, randomTiming.tRcd),
+        Rule(activate, pre, randomTiming.tRas),
+        Rule(refresh, pre, randomTiming.tRfc),
+        Rule(refresh, activate, randomTiming.tRfc),
+        Rule(write, read, randomTiming.tCcd),
+        Rule(write, write, randomTiming.tCcd),
+        Rule(read, read, randomTiming.tCcd),
+        Rule(read, write, randomTiming.tCcd),
+        Rule(activate, activate, randomTiming.tRc),
+        Rule(write, pre, randomTiming.tWr),
+        Rule(write, read, randomTiming.tWtr),
+        Rule(zq, activate, randomTiming.tZqcs.get))
+      val timestamps = Array.fill(randomCfg.rankBankCount, 6)(Option.empty[Long])
+      var actHistory = Vector.empty[Long]
+      var lastAct = Option.empty[Long]
+      var time = 0L
+      var expectedViolations = 0L
+      val random = new Random(0x54494d45)
+
+      dut.io.enable.poke(true.B)
+      dut.io.clear.poke(false.B)
+      nop(dut)
+
+      for (cycle <- 0 until 700) {
+        nop(dut)
+        val enabled = random.nextInt(11) != 0
+        val clear = cycle > 0 && cycle % 173 == 0
+        dut.io.enable.poke(enabled.B)
+        dut.io.clear.poke(clear.B)
+        val issued = Array.fill[Option[(Int, Int, Boolean)]](randomCfg.nPhases)(None)
+
+        for (phaseIndex <- 0 until randomCfg.nPhases if random.nextInt(100) < 42) {
+          val kind = random.nextInt(6)
+          val bank = random.nextInt(randomCfg.rankBankCount)
+          val allBanks = kind == refresh || (kind == pre && random.nextInt(5) == 0)
+          val (rasN, casN, weN) = kind match {
+            case `pre` => (false, true, false)
+            case `refresh` => (false, false, true)
+            case `activate` => (false, true, true)
+            case `read` => (true, false, true)
+            case `write` => (true, false, false)
+            case `zq` => (true, true, false)
+          }
+          command(dut, bank, rasN, casN, weN, phaseIndex)
+          if (allBanks && kind == pre)
+            dut.io.dfi.phases(phaseIndex).address.poke((BigInt(1) << 10).U)
+          issued(phaseIndex) = Some((kind, bank, allBanks))
+        }
+
+        var expectedViolation = false
+        for (phaseIndex <- 0 until randomCfg.nPhases) {
+          issued(phaseIndex).foreach { case (kind, bank, allBanks) =>
+            val now = time + phaseIndex
+            val targets = if (allBanks) 0 until randomCfg.rankBankCount else Seq(bank)
+            for (target <- targets) {
+              for (rule <- rules if rule.current == kind) {
+                timestamps(target)(rule.previous).foreach { previous =>
+                  if (enabled && now - previous < rule.delay * randomCfg.nPhases)
+                    expectedViolation = true
+                }
+              }
+              timestamps(target)(kind) = Some(now)
+            }
+            if (kind == activate) {
+              if (enabled && lastAct.exists(now - _ < randomTiming.tRrd * randomCfg.nPhases))
+                expectedViolation = true
+              if (enabled && actHistory.size >= 4 &&
+                  now - actHistory(3) < randomTiming.tFaw * randomCfg.nPhases)
+                expectedViolation = true
+              lastAct = Some(now)
+              actHistory = (now +: actHistory).take(4)
+            }
+          }
+        }
+
+        dut.io.violation.expect(expectedViolation.B)
+        dut.clock.step()
+        expectedViolations = if (clear) 0L
+          else if (expectedViolation) expectedViolations + 1L else expectedViolations
+        dut.io.violations.expect(expectedViolations.U)
+        time += randomCfg.nPhases
+      }
     }
   }
 }
