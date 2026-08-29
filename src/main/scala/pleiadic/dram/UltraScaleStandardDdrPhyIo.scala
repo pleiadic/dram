@@ -4,13 +4,8 @@ import chisel3._
 import chisel3.experimental.{Analog, attach}
 import scala.language.reflectiveCalls
 
-class UltraScaleStandardDdrPads(config: DramConfig, dqsPerByte: Int = 1)
-    extends Bundle {
-  require(dqsPerByte == 1 || dqsPerByte == 2,
-    "UltraScale DDR pads support one (x8) or two (x4) DQS pairs per byte")
+class UltraScaleStandardDdrCommandPads(config: DramConfig) extends Bundle {
   private val addressBits = config.rowBits.max(config.columnBits).max(11)
-  private val padBits = config.effectivePadDataBits
-  private val padBytes = padBits / 8
   val clockPositive = Analog(1.W)
   val clockNegative = Analog(1.W)
   val address = Output(Vec(addressBits, Bool()))
@@ -23,10 +18,43 @@ class UltraScaleStandardDdrPads(config: DramConfig, dqsPerByte: Int = 1)
   val clockEnable = Output(Vec(config.nranks, Bool()))
   val onDieTermination = Output(Vec(config.nranks, Bool()))
   val resetN = Output(Bool())
+}
+
+class UltraScaleStandardDdrPads(config: DramConfig, dqsPerByte: Int = 1,
+    padGroups: Int = 1)
+    extends Bundle {
+  require(dqsPerByte == 1 || dqsPerByte == 2,
+    "UltraScale DDR pads support one (x8) or two (x4) DQS pairs per byte")
+  require(padGroups >= 1)
+  private val padBits = config.effectivePadDataBits
+  private val padBytes = padBits / 8
+  require(padBits % padGroups == 0 && (padBits / padGroups) % 8 == 0,
+    "each UltraScale pad group must contain a whole number of byte lanes")
+  val commandGroups = Vec(padGroups, new UltraScaleStandardDdrCommandPads(config))
   val dq = Vec(padBits, Analog(1.W))
   val dqsPositive = Vec(padBytes * dqsPerByte, Analog(1.W))
   val dqsNegative = Vec(padBytes * dqsPerByte, Analog(1.W))
   val dataMask = Output(Vec(padBytes, Bool()))
+
+  // Source-compatible aliases for the historical single command group.
+  def clockPositive = commandGroups(0).clockPositive
+  def clockNegative = commandGroups(0).clockNegative
+  def address = commandGroups(0).address
+  def bank = commandGroups(0).bank
+  def chipSelectN = commandGroups(0).chipSelectN
+  def rowStrobeN = commandGroups(0).rowStrobeN
+  def columnStrobeN = commandGroups(0).columnStrobeN
+  def writeEnableN = commandGroups(0).writeEnableN
+  def activateN = commandGroups(0).activateN
+  def clockEnable = commandGroups(0).clockEnable
+  def onDieTermination = commandGroups(0).onDieTermination
+  def resetN = commandGroups(0).resetN
+
+  /** LiteDRAM PHYPadsCombiner ordering for a signal within a physical group. */
+  def combinedIndex(localIndex: Int, group: Int): Int = {
+    require(localIndex >= 0 && group >= 0 && group < padGroups)
+    localIndex * padGroups + group
+  }
 }
 
 /**
@@ -38,7 +66,7 @@ class UltraScaleStandardDdrPads(config: DramConfig, dqsPerByte: Int = 1)
   */
 class UltraScaleStandardDdrPhyIo(config: DramConfig, device: String,
     refClockFrequencyMHz: Int, dqsOutputDelayInitialValuePs: Int,
-    dqsPerByte: Int = 1)
+    dqsPerByte: Int = 1, padGroups: Int = 1)
     extends RawModule {
   require(Set("DDR3", "DDR4").contains(config.memType))
   require(config.nPhases == 4)
@@ -46,6 +74,7 @@ class UltraScaleStandardDdrPhyIo(config: DramConfig, device: String,
   require(dqsOutputDelayInitialValuePs >= 0 && dqsOutputDelayInitialValuePs <= 1250)
   require(dqsPerByte == 1 || dqsPerByte == 2,
     "dqsPerByte must be one for x8 devices or two for x4 devices")
+  require(padGroups >= 1)
   private val addressBits = config.rowBits.max(config.columnBits).max(11)
   private val padBits = config.effectivePadDataBits
   private val padBytes = padBits / 8
@@ -72,7 +101,7 @@ class UltraScaleStandardDdrPhyIo(config: DramConfig, device: String,
     val dqOutputDelayValue = Output(Vec(padBits, UInt(9.W)))
     val dataMaskOutputDelayValue = Output(Vec(padBytes, UInt(9.W)))
     val dqsOutputDelayValue = Output(Vec(padBytes * dqsPerByte, UInt(9.W)))
-    val pads = new UltraScaleStandardDdrPads(config, dqsPerByte)
+    val pads = new UltraScaleStandardDdrPads(config, dqsPerByte, padGroups)
   })
 
   private def delayedOutput(value: UInt, delayReset: Bool,
@@ -91,41 +120,44 @@ class UltraScaleStandardDdrPhyIo(config: DramConfig, device: String,
     output
   }
 
-  private val clockOutput = delayedOutput(io.parallel.clock,
-    io.commandOutputDelayReset, io.commandOutputDelayIncrement)
-  private val clockBuffer = Module(new S7DifferentialOutputBuffer)
-  clockBuffer.io.dataIn := clockOutput.io.serial
-  io.commandOutputDelayValue := clockOutput.io.delayValue
-  attach(clockBuffer.io.padPositive, io.pads.clockPositive)
-  attach(clockBuffer.io.padNegative, io.pads.clockNegative)
+  for (group <- 0 until padGroups) {
+    val pads = io.pads.commandGroups(group)
+    val clockOutput = delayedOutput(io.parallel.clock,
+      io.commandOutputDelayReset, io.commandOutputDelayIncrement)
+    val clockBuffer = Module(new S7DifferentialOutputBuffer)
+    clockBuffer.io.dataIn := clockOutput.io.serial
+    if (group == 0) io.commandOutputDelayValue := clockOutput.io.delayValue
+    attach(clockBuffer.io.padPositive, pads.clockPositive)
+    attach(clockBuffer.io.padNegative, pads.clockNegative)
 
-  for (bit <- 0 until addressBits) {
-    io.pads.address(bit) := delayedOutput(io.parallel.address(bit),
+    for (bit <- 0 until addressBits) {
+      pads.address(bit) := delayedOutput(io.parallel.address(bit),
+        io.commandOutputDelayReset, io.commandOutputDelayIncrement).io.serial
+    }
+    for (bit <- 0 until config.bankBits) {
+      pads.bank(bit) := delayedOutput(io.parallel.bank(bit),
+        io.commandOutputDelayReset, io.commandOutputDelayIncrement).io.serial
+    }
+    for (rank <- 0 until config.nranks) {
+      pads.chipSelectN(rank) := delayedOutput(io.parallel.chipSelectN(rank),
+        io.commandOutputDelayReset, io.commandOutputDelayIncrement).io.serial
+      pads.clockEnable(rank) := delayedOutput(io.parallel.clockEnable(rank),
+        io.commandOutputDelayReset, io.commandOutputDelayIncrement).io.serial
+      pads.onDieTermination(rank) := delayedOutput(
+        io.parallel.onDieTermination(rank), io.commandOutputDelayReset,
+        io.commandOutputDelayIncrement).io.serial
+    }
+    pads.rowStrobeN := delayedOutput(io.parallel.rowStrobeN,
+      io.commandOutputDelayReset, io.commandOutputDelayIncrement).io.serial
+    pads.columnStrobeN := delayedOutput(io.parallel.columnStrobeN,
+      io.commandOutputDelayReset, io.commandOutputDelayIncrement).io.serial
+    pads.writeEnableN := delayedOutput(io.parallel.writeEnableN,
+      io.commandOutputDelayReset, io.commandOutputDelayIncrement).io.serial
+    pads.activateN := delayedOutput(io.parallel.activateN,
+      io.commandOutputDelayReset, io.commandOutputDelayIncrement).io.serial
+    pads.resetN := delayedOutput(io.parallel.resetN,
       io.commandOutputDelayReset, io.commandOutputDelayIncrement).io.serial
   }
-  for (bit <- 0 until config.bankBits) {
-    io.pads.bank(bit) := delayedOutput(io.parallel.bank(bit),
-      io.commandOutputDelayReset, io.commandOutputDelayIncrement).io.serial
-  }
-  for (rank <- 0 until config.nranks) {
-    io.pads.chipSelectN(rank) := delayedOutput(io.parallel.chipSelectN(rank),
-      io.commandOutputDelayReset, io.commandOutputDelayIncrement).io.serial
-    io.pads.clockEnable(rank) := delayedOutput(io.parallel.clockEnable(rank),
-      io.commandOutputDelayReset, io.commandOutputDelayIncrement).io.serial
-    io.pads.onDieTermination(rank) := delayedOutput(
-      io.parallel.onDieTermination(rank), io.commandOutputDelayReset,
-      io.commandOutputDelayIncrement).io.serial
-  }
-  io.pads.rowStrobeN := delayedOutput(io.parallel.rowStrobeN,
-    io.commandOutputDelayReset, io.commandOutputDelayIncrement).io.serial
-  io.pads.columnStrobeN := delayedOutput(io.parallel.columnStrobeN,
-    io.commandOutputDelayReset, io.commandOutputDelayIncrement).io.serial
-  io.pads.writeEnableN := delayedOutput(io.parallel.writeEnableN,
-    io.commandOutputDelayReset, io.commandOutputDelayIncrement).io.serial
-  io.pads.activateN := delayedOutput(io.parallel.activateN,
-    io.commandOutputDelayReset, io.commandOutputDelayIncrement).io.serial
-  io.pads.resetN := delayedOutput(io.parallel.resetN,
-    io.commandOutputDelayReset, io.commandOutputDelayIncrement).io.serial
 
   for (bit <- 0 until padBits) {
     val lane = Module(new UltraScaleBidirectionalSerdesLane(device,
@@ -181,13 +213,15 @@ class UltraScaleStandardDdrPhyIo(config: DramConfig, device: String,
 }
 
 class UltraScaleDdrPhyIo(config: DramConfig, refClockFrequencyMHz: Int = 200,
-    dqsOutputDelayInitialValuePs: Int = 0, dqsPerByte: Int = 1)
+    dqsOutputDelayInitialValuePs: Int = 0, dqsPerByte: Int = 1,
+    padGroups: Int = 1)
     extends UltraScaleStandardDdrPhyIo(
   config, UltraScaleDevice.UltraScale, refClockFrequencyMHz,
-  dqsOutputDelayInitialValuePs, dqsPerByte)
+  dqsOutputDelayInitialValuePs, dqsPerByte, padGroups)
 
 class UltraScalePlusDdrPhyIo(config: DramConfig, refClockFrequencyMHz: Int = 300,
-    dqsOutputDelayInitialValuePs: Int = 0, dqsPerByte: Int = 1)
+    dqsOutputDelayInitialValuePs: Int = 0, dqsPerByte: Int = 1,
+    padGroups: Int = 1)
     extends UltraScaleStandardDdrPhyIo(
   config, UltraScaleDevice.UltraScalePlus, refClockFrequencyMHz,
-  dqsOutputDelayInitialValuePs, dqsPerByte)
+  dqsOutputDelayInitialValuePs, dqsPerByte, padGroups)

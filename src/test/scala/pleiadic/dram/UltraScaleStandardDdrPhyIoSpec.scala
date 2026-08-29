@@ -8,38 +8,40 @@ import org.scalatest.flatspec.AnyFlatSpec
 import scala.language.reflectiveCalls
 
 class UltraScaleStandardDdrPhyIoHarness(memType: String, plus: Boolean,
-    dqsPerByte: Int = 1)
+    dqsPerByte: Int = 1, padGroups: Int = 1)
     extends Module {
   private val config = DramConfig(addressBits = 40, dataBits = 64,
     bankBits = (if (memType == "DDR4") 4 else 3),
     rowBits = (if (memType == "DDR4") 17 else 15), columnBits = 10,
-    memType = memType, nPhases = 4, padDataBits = 8)
+    memType = memType, nPhases = 4, padDataBits = 8 * padGroups)
   private val addressBits = config.rowBits.max(config.columnBits).max(11)
   val io = IO(new Bundle {
     val address0 = Input(UInt(8.W))
     val chipSelectN = Input(UInt(8.W))
     val activateN = Input(UInt(8.W))
-    val address0Pad = Output(Bool())
-    val chipSelectNPad = Output(Bool())
-    val activateNPad = Output(Bool())
+    val address0Pad = Output(Vec(padGroups, Bool()))
+    val chipSelectNPad = Output(Vec(padGroups, Bool()))
+    val activateNPad = Output(Vec(padGroups, Bool()))
     val commandOutputDelayValue = Output(UInt(9.W))
     val dqInputDelayValue = Output(UInt(9.W))
     val dqOutputDelayValue = Output(UInt(9.W))
     val dataMaskOutputDelayValue = Output(UInt(9.W))
-    val dqsOutputDelayValue = Output(Vec(dqsPerByte, UInt(9.W)))
-    val clockPositive = Analog(1.W)
-    val clockNegative = Analog(1.W)
-    val dq = Vec(8, Analog(1.W))
-    val dqsPositive = Vec(dqsPerByte, Analog(1.W))
-    val dqsNegative = Vec(dqsPerByte, Analog(1.W))
+    val dqsOutputDelayValue = Output(Vec(padGroups * dqsPerByte, UInt(9.W)))
+    val clockPositive = Vec(padGroups, Analog(1.W))
+    val clockNegative = Vec(padGroups, Analog(1.W))
+    val dq = Vec(8 * padGroups, Analog(1.W))
+    val dqsPositive = Vec(padGroups * dqsPerByte, Analog(1.W))
+    val dqsNegative = Vec(padGroups * dqsPerByte, Analog(1.W))
   })
 
   private val phy: UltraScaleStandardDdrPhyIo = if (plus) {
     Module(new UltraScalePlusDdrPhyIo(config,
-      dqsOutputDelayInitialValuePs = 375, dqsPerByte = dqsPerByte))
+      dqsOutputDelayInitialValuePs = 375, dqsPerByte = dqsPerByte,
+      padGroups = padGroups))
   } else {
     Module(new UltraScaleDdrPhyIo(config,
-      dqsOutputDelayInitialValuePs = 375, dqsPerByte = dqsPerByte))
+      dqsOutputDelayInitialValuePs = 375, dqsPerByte = dqsPerByte,
+      padGroups = padGroups))
   }
   phy.io.reset := reset.asBool
   phy.io.dividedClock := clock
@@ -74,18 +76,22 @@ class UltraScaleStandardDdrPhyIoHarness(memType: String, plus: Boolean,
   phy.io.parallel.dqsOutputEnable := false.B
   phy.io.parallel.dataMask.foreach(_ := 0.U)
 
-  io.address0Pad := phy.io.pads.address(0)
-  io.chipSelectNPad := phy.io.pads.chipSelectN(0)
-  io.activateNPad := phy.io.pads.activateN
+  for (group <- 0 until padGroups) {
+    io.address0Pad(group) := phy.io.pads.commandGroups(group).address(0)
+    io.chipSelectNPad(group) := phy.io.pads.commandGroups(group).chipSelectN(0)
+    io.activateNPad(group) := phy.io.pads.commandGroups(group).activateN
+    attach(io.clockPositive(group),
+      phy.io.pads.commandGroups(group).clockPositive)
+    attach(io.clockNegative(group),
+      phy.io.pads.commandGroups(group).clockNegative)
+  }
   io.commandOutputDelayValue := phy.io.commandOutputDelayValue
   io.dqInputDelayValue := phy.io.dqInputDelayValue(0)
   io.dqOutputDelayValue := phy.io.dqOutputDelayValue(0)
   io.dataMaskOutputDelayValue := phy.io.dataMaskOutputDelayValue(0)
   io.dqsOutputDelayValue := phy.io.dqsOutputDelayValue
-  attach(io.clockPositive, phy.io.pads.clockPositive)
-  attach(io.clockNegative, phy.io.pads.clockNegative)
-  for (bit <- 0 until 8) attach(io.dq(bit), phy.io.pads.dq(bit))
-  for (strobe <- 0 until dqsPerByte) {
+  for (bit <- 0 until 8 * padGroups) attach(io.dq(bit), phy.io.pads.dq(bit))
+  for (strobe <- 0 until padGroups * dqsPerByte) {
     attach(io.dqsPositive(strobe), phy.io.pads.dqsPositive(strobe))
     attach(io.dqsNegative(strobe), phy.io.pads.dqsNegative(strobe))
   }
@@ -103,9 +109,9 @@ class UltraScaleStandardDdrPhyIoSpec extends AnyFlatSpec with ChiselScalatestTes
         dut.io.address0.poke("h01".U)
         dut.io.chipSelectN.poke("hfe".U)
         dut.io.activateN.poke("hff".U)
-        dut.io.address0Pad.expect(true.B)
-        dut.io.chipSelectNPad.expect(false.B)
-        dut.io.activateNPad.expect(true.B)
+        dut.io.address0Pad(0).expect(true.B)
+        dut.io.chipSelectNPad(0).expect(false.B)
+        dut.io.activateNPad(0).expect(true.B)
         dut.io.commandOutputDelayValue.expect(0.U)
         dut.io.dqInputDelayValue.expect(0.U)
         dut.io.dqOutputDelayValue.expect(0.U)
@@ -136,6 +142,22 @@ class UltraScaleStandardDdrPhyIoSpec extends AnyFlatSpec with ChiselScalatestTes
         dut.io.activateN.poke("hff".U)
         dut.io.dqsOutputDelayValue(0).expect(375.U)
         dut.io.dqsOutputDelayValue(1).expect(375.U)
+        dut.clock.step(2)
+      }
+  }
+
+  it should "replicate clock and command primitives across separate pad groups" in {
+    test(new UltraScaleStandardDdrPhyIoHarness("DDR3", plus = false,
+      padGroups = 2)).withAnnotations(verilator) { dut =>
+        dut.io.address0.poke("ha5".U)
+        dut.io.chipSelectN.poke("h3c".U)
+        dut.io.activateN.poke("h81".U)
+        for (group <- 0 until 2) {
+          dut.io.address0Pad(group).expect(true.B)
+          dut.io.chipSelectNPad(group).expect(false.B)
+          dut.io.activateNPad(group).expect(true.B)
+        }
+        dut.io.dqsOutputDelayValue.foreach(_.expect(375.U))
         dut.clock.step(2)
       }
   }

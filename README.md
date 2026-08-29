@@ -207,7 +207,9 @@ selects per logical rank for DDR4 clam-shell boards, broadcasting normal
 controller traffic while retaining independent top/bottom software selects.
 Initialization tables split clam-shell mode-register writes with the required
 bottom-side address/bank swaps and repeat RDIMM commands with the RCD B-side
-inversion masks. Multi-pad-group board assembly remains a wrapper extension.
+inversion masks. Multi-pad-group assembly exposes one independent CK/command
+primitive set per group while retaining LiteDRAM's interleaved flattened
+`localIndex * groups + group` ordering for DQ, DM, and DQS pads.
 
 The ECP5 DDR3 PHY provides a half-rate two-phase DFI boundary with four DQ
 edges per phase. It emits each BL8 write over two x2 primitive words, joins two
