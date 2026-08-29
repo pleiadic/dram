@@ -125,6 +125,9 @@ production geometries should be reduced when instantiating its explicit test
 memory. A 600-cycle independent random oracle checks simultaneous phase
 commands, open-bank transitions, all-bank precharge, refresh, read/write
 collisions, write-data alignment, sticky error counting, and clearing.
+The release regression also connects three concurrent Native masters through
+the crossbar and complete DFI controller into this model, checking 48 writes
+and 48 backpressured reads while refresh remains active.
 
 Portable command adapters translate legacy DFI encodings into LPDDR4 and
 LPDDR5 CA edge sequences or RPC parallel Request Packets. They cover mode

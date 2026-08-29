@@ -45,6 +45,45 @@ class LiteDramDfiCoreHarness(config: DramConfig) extends Module {
   io.refreshes := refreshes
 }
 
+class LiteDramDfiCoreMultiHarness(config: DramConfig, masterCount: Int)
+    extends Module {
+  val io = IO(new Bundle {
+    val masters = Vec(masterCount, new NativeSlavePort(config))
+    val protocolError = Output(Bool())
+    val errors = Output(UInt(32.W))
+    val refreshes = Output(UInt(16.W))
+  })
+
+  private val core = Module(new LiteDramDfiCore(config, masterCount))
+  private val memory = Module(new DfiMemoryModel(config,
+    readLatency = config.readLatency, writeLatency = 0))
+  for (master <- 0 until masterCount) {
+    core.io.masters(master).command.valid := io.masters(master).command.valid
+    core.io.masters(master).command.bits := io.masters(master).command.bits
+    io.masters(master).command.ready := core.io.masters(master).command.ready
+    core.io.masters(master).writeData.valid := io.masters(master).writeData.valid
+    core.io.masters(master).writeData.bits := io.masters(master).writeData.bits
+    io.masters(master).writeData.ready := core.io.masters(master).writeData.ready
+    io.masters(master).readData.valid := core.io.masters(master).readData.valid
+    io.masters(master).readData.bits := core.io.masters(master).readData.bits
+    core.io.masters(master).readData.ready := io.masters(master).readData.ready
+    core.io.masters(master).flush := io.masters(master).flush
+    io.masters(master).lock := core.io.masters(master).lock
+  }
+  memory.io.dfi := core.io.dfi
+  memory.io.clearErrors := false.B
+  core.io.phyRead := memory.io.read
+  io.protocolError := memory.io.protocolError
+  io.errors := memory.io.errors
+  private val refresh = core.io.dfi.phases.map { phase =>
+    !phase.csN.asUInt.andR && phase.actN && !phase.rasN &&
+      !phase.casN && phase.weN
+  }.reduce(_ || _)
+  private val refreshes = RegInit(0.U(16.W))
+  when(refresh && !refreshes.andR) { refreshes := refreshes + 1.U }
+  io.refreshes := refreshes
+}
+
 class LiteDramDfiCoreSpec extends AnyFlatSpec with ChiselScalatestTester {
   private val config = DramConfig(addressBits = 8, dataBits = 32,
     bankBits = 1, rowBits = 2, columnBits = 2, nPhases = 2, nranks = 2,
@@ -151,6 +190,118 @@ class LiteDramDfiCoreSpec extends AnyFlatSpec with ChiselScalatestTester {
 
       master.readData.ready.poke(true.B)
       assert(dut.io.refreshes.peek().litValue > 0, "random run issued no refreshes")
+      dut.io.protocolError.expect(false.B)
+      dut.io.errors.expect(0.U)
+    }
+  }
+
+  it should "preserve three concurrent Native masters through the complete DFI path" in {
+    val masterCount = 3
+    val systemConfig = config.copy(timing = config.timing.copy(tRefi = 64))
+    test(new LiteDramDfiCoreMultiHarness(systemConfig, masterCount)) { dut =>
+      val random = new Random(0x53595354454dL)
+      val writes = Array.tabulate(masterCount) { master =>
+        (0 until 48).filter(_ % masterCount == master).map { address =>
+          address -> (BigInt(master + 1) << 28 | BigInt(address * 0x10201))
+        }.toVector
+      }
+      for (master <- 0 until masterCount) {
+        val port = dut.io.masters(master)
+        port.flush.poke(false.B)
+        port.command.valid.poke(false.B)
+        port.writeData.valid.poke(false.B)
+        port.readData.ready.poke(false.B)
+      }
+
+      val writeIndex = Array.fill(masterCount)(0)
+      val commandAccepted = Array.fill(masterCount)(false)
+      val dataAccepted = Array.fill(masterCount)(false)
+      var cycles = 0
+      while (writeIndex.exists(_ < 16) && cycles < 10000) {
+        for (master <- 0 until masterCount) {
+          val port = dut.io.masters(master)
+          if (writeIndex(master) < writes(master).size) {
+            val (address, value) = writes(master)(writeIndex(master))
+            port.command.valid.poke((!commandAccepted(master)).B)
+            port.command.bits.write.poke(true.B)
+            port.command.bits.address.poke(address.U)
+            port.writeData.valid.poke((!dataAccepted(master)).B)
+            port.writeData.bits.data.poke(value.U)
+            port.writeData.bits.byteEnable.poke("hf".U)
+          } else {
+            port.command.valid.poke(false.B)
+            port.writeData.valid.poke(false.B)
+          }
+        }
+        for (master <- 0 until masterCount) {
+          val port = dut.io.masters(master)
+          if (port.command.valid.peek().litToBoolean &&
+              port.command.ready.peek().litToBoolean) commandAccepted(master) = true
+          if (port.writeData.valid.peek().litToBoolean &&
+              port.writeData.ready.peek().litToBoolean) dataAccepted(master) = true
+        }
+        dut.clock.step()
+        for (master <- 0 until masterCount) {
+          if (commandAccepted(master) && dataAccepted(master)) {
+            writeIndex(master) += 1
+            commandAccepted(master) = false
+            dataAccepted(master) = false
+          }
+        }
+        cycles += 1
+      }
+      assert(writeIndex.forall(_ == 16), s"concurrent writes timed out: ${writeIndex.mkString(",")}")
+
+      dut.io.masters.foreach { port =>
+        port.command.valid.poke(false.B)
+        port.writeData.valid.poke(false.B)
+      }
+      dut.clock.step(200)
+      dut.io.protocolError.expect(false.B)
+      dut.io.errors.expect(0.U)
+
+      val reads = writes.map(values => random.shuffle(values))
+      val readCommandIndex = Array.fill(masterCount)(0)
+      val expected = Array.fill(masterCount)(mutable.Queue.empty[BigInt])
+      val completed = Array.fill(masterCount)(0)
+      cycles = 0
+      while (completed.exists(_ < 16) && cycles < 20000) {
+        for (master <- 0 until masterCount) {
+          val port = dut.io.masters(master)
+          if (readCommandIndex(master) < reads(master).size) {
+            val (address, _) = reads(master)(readCommandIndex(master))
+            port.command.valid.poke(true.B)
+            port.command.bits.write.poke(false.B)
+            port.command.bits.address.poke(address.U)
+          } else port.command.valid.poke(false.B)
+          port.writeData.valid.poke(false.B)
+          port.readData.ready.poke((random.nextInt(100) < 61).B)
+        }
+
+        for (master <- 0 until masterCount) {
+          val port = dut.io.masters(master)
+          if (port.command.valid.peek().litToBoolean &&
+              port.command.ready.peek().litToBoolean) {
+            expected(master).enqueue(reads(master)(readCommandIndex(master))._2)
+            readCommandIndex(master) += 1
+          }
+          if (port.readData.valid.peek().litToBoolean) {
+            assert(expected(master).nonEmpty,
+              s"master $master returned data without an accepted read")
+            port.readData.bits.data.expect(expected(master).front.U)
+            if (port.readData.ready.peek().litToBoolean) {
+              expected(master).dequeue()
+              completed(master) += 1
+            }
+          }
+        }
+        dut.clock.step()
+        cycles += 1
+      }
+      assert(completed.forall(_ == 16),
+        s"concurrent reads timed out: ${completed.mkString(",")}")
+      assert(expected.forall(_.isEmpty))
+      assert(dut.io.refreshes.peek().litValue > 0, "system run issued no refreshes")
       dut.io.protocolError.expect(false.B)
       dut.io.errors.expect(0.U)
     }
