@@ -4,7 +4,10 @@ import chisel3._
 import chisel3.experimental.{Analog, attach}
 import scala.language.reflectiveCalls
 
-class UltraScaleStandardDdrPads(config: DramConfig) extends Bundle {
+class UltraScaleStandardDdrPads(config: DramConfig, dqsPerByte: Int = 1)
+    extends Bundle {
+  require(dqsPerByte == 1 || dqsPerByte == 2,
+    "UltraScale DDR pads support one (x8) or two (x4) DQS pairs per byte")
   private val addressBits = config.rowBits.max(config.columnBits).max(11)
   private val padBits = config.effectivePadDataBits
   private val padBytes = padBits / 8
@@ -21,8 +24,8 @@ class UltraScaleStandardDdrPads(config: DramConfig) extends Bundle {
   val onDieTermination = Output(Vec(config.nranks, Bool()))
   val resetN = Output(Bool())
   val dq = Vec(padBits, Analog(1.W))
-  val dqsPositive = Vec(padBytes, Analog(1.W))
-  val dqsNegative = Vec(padBytes, Analog(1.W))
+  val dqsPositive = Vec(padBytes * dqsPerByte, Analog(1.W))
+  val dqsNegative = Vec(padBytes * dqsPerByte, Analog(1.W))
   val dataMask = Output(Vec(padBytes, Bool()))
 }
 
@@ -34,12 +37,15 @@ class UltraScaleStandardDdrPads(config: DramConfig) extends Bundle {
   * single OE register used by LiteDRAM's E3 primitive boundary.
   */
 class UltraScaleStandardDdrPhyIo(config: DramConfig, device: String,
-    refClockFrequencyMHz: Int, dqsOutputDelayInitialValuePs: Int)
+    refClockFrequencyMHz: Int, dqsOutputDelayInitialValuePs: Int,
+    dqsPerByte: Int = 1)
     extends RawModule {
   require(Set("DDR3", "DDR4").contains(config.memType))
   require(config.nPhases == 4)
   require(UltraScaleDevice.supported.contains(device))
   require(dqsOutputDelayInitialValuePs >= 0 && dqsOutputDelayInitialValuePs <= 1250)
+  require(dqsPerByte == 1 || dqsPerByte == 2,
+    "dqsPerByte must be one for x8 devices or two for x4 devices")
   private val addressBits = config.rowBits.max(config.columnBits).max(11)
   private val padBits = config.effectivePadDataBits
   private val padBytes = padBits / 8
@@ -65,8 +71,8 @@ class UltraScaleStandardDdrPhyIo(config: DramConfig, device: String,
     val dqInputDelayValue = Output(Vec(padBits, UInt(9.W)))
     val dqOutputDelayValue = Output(Vec(padBits, UInt(9.W)))
     val dataMaskOutputDelayValue = Output(Vec(padBytes, UInt(9.W)))
-    val dqsOutputDelayValue = Output(Vec(padBytes, UInt(9.W)))
-    val pads = new UltraScaleStandardDdrPads(config)
+    val dqsOutputDelayValue = Output(Vec(padBytes * dqsPerByte, UInt(9.W)))
+    val pads = new UltraScaleStandardDdrPads(config, dqsPerByte)
   })
 
   private def delayedOutput(value: UInt, delayReset: Bool,
@@ -146,22 +152,25 @@ class UltraScaleStandardDdrPhyIo(config: DramConfig, device: String,
   }
 
   for (byte <- 0 until padBytes) {
-    val dqs = Module(new UltraScaleDifferentialOutputSerdesIoLane(device,
-      refClockFrequencyMHz, dqsOutputDelayInitialValuePs))
-    dqs.io.reset := io.reset
-    dqs.io.serialClock := io.serialClock
-    dqs.io.dividedClock := io.dividedClock
-    dqs.io.delayClock := io.delayClock
-    dqs.io.enableVtc := io.enableVtc
-    dqs.io.delayReset := io.reset ||
-      (io.dqsOutputDelayReset && io.delaySelect(byte))
-    dqs.io.delayIncrement :=
-      io.dqsOutputDelayIncrement && io.delaySelect(byte)
-    dqs.io.parallelOut := io.parallel.dqs(byte)
-    dqs.io.outputEnable := io.parallel.dqsOutputEnable
-    io.dqsOutputDelayValue(byte) := dqs.io.delayValue
-    attach(dqs.io.padPositive, io.pads.dqsPositive(byte))
-    attach(dqs.io.padNegative, io.pads.dqsNegative(byte))
+    for (strobe <- 0 until dqsPerByte) {
+      val physicalDqs = byte * dqsPerByte + strobe
+      val dqs = Module(new UltraScaleDifferentialOutputSerdesIoLane(device,
+        refClockFrequencyMHz, dqsOutputDelayInitialValuePs))
+      dqs.io.reset := io.reset
+      dqs.io.serialClock := io.serialClock
+      dqs.io.dividedClock := io.dividedClock
+      dqs.io.delayClock := io.delayClock
+      dqs.io.enableVtc := io.enableVtc
+      dqs.io.delayReset := io.reset ||
+        (io.dqsOutputDelayReset && io.delaySelect(byte))
+      dqs.io.delayIncrement :=
+        io.dqsOutputDelayIncrement && io.delaySelect(byte)
+      dqs.io.parallelOut := io.parallel.dqs(byte)
+      dqs.io.outputEnable := io.parallel.dqsOutputEnable
+      io.dqsOutputDelayValue(physicalDqs) := dqs.io.delayValue
+      attach(dqs.io.padPositive, io.pads.dqsPositive(physicalDqs))
+      attach(dqs.io.padNegative, io.pads.dqsNegative(physicalDqs))
+    }
 
     val dataMask = delayedOutput(io.parallel.dataMask(byte),
       io.dqOutputDelayReset && io.delaySelect(byte),
@@ -172,11 +181,13 @@ class UltraScaleStandardDdrPhyIo(config: DramConfig, device: String,
 }
 
 class UltraScaleDdrPhyIo(config: DramConfig, refClockFrequencyMHz: Int = 200,
-    dqsOutputDelayInitialValuePs: Int = 0) extends UltraScaleStandardDdrPhyIo(
+    dqsOutputDelayInitialValuePs: Int = 0, dqsPerByte: Int = 1)
+    extends UltraScaleStandardDdrPhyIo(
   config, UltraScaleDevice.UltraScale, refClockFrequencyMHz,
-  dqsOutputDelayInitialValuePs)
+  dqsOutputDelayInitialValuePs, dqsPerByte)
 
 class UltraScalePlusDdrPhyIo(config: DramConfig, refClockFrequencyMHz: Int = 300,
-    dqsOutputDelayInitialValuePs: Int = 0) extends UltraScaleStandardDdrPhyIo(
+    dqsOutputDelayInitialValuePs: Int = 0, dqsPerByte: Int = 1)
+    extends UltraScaleStandardDdrPhyIo(
   config, UltraScaleDevice.UltraScalePlus, refClockFrequencyMHz,
-  dqsOutputDelayInitialValuePs)
+  dqsOutputDelayInitialValuePs, dqsPerByte)

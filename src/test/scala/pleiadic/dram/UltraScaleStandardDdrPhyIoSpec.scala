@@ -7,7 +7,8 @@ import chiseltest.simulator.{VerilatorBackendAnnotation, VerilatorCFlags, Verila
 import org.scalatest.flatspec.AnyFlatSpec
 import scala.language.reflectiveCalls
 
-class UltraScaleStandardDdrPhyIoHarness(memType: String, plus: Boolean)
+class UltraScaleStandardDdrPhyIoHarness(memType: String, plus: Boolean,
+    dqsPerByte: Int = 1)
     extends Module {
   private val config = DramConfig(addressBits = 40, dataBits = 64,
     bankBits = (if (memType == "DDR4") 4 else 3),
@@ -25,20 +26,20 @@ class UltraScaleStandardDdrPhyIoHarness(memType: String, plus: Boolean)
     val dqInputDelayValue = Output(UInt(9.W))
     val dqOutputDelayValue = Output(UInt(9.W))
     val dataMaskOutputDelayValue = Output(UInt(9.W))
-    val dqsOutputDelayValue = Output(UInt(9.W))
+    val dqsOutputDelayValue = Output(Vec(dqsPerByte, UInt(9.W)))
     val clockPositive = Analog(1.W)
     val clockNegative = Analog(1.W)
     val dq = Vec(8, Analog(1.W))
-    val dqsPositive = Analog(1.W)
-    val dqsNegative = Analog(1.W)
+    val dqsPositive = Vec(dqsPerByte, Analog(1.W))
+    val dqsNegative = Vec(dqsPerByte, Analog(1.W))
   })
 
   private val phy: UltraScaleStandardDdrPhyIo = if (plus) {
     Module(new UltraScalePlusDdrPhyIo(config,
-      dqsOutputDelayInitialValuePs = 375))
+      dqsOutputDelayInitialValuePs = 375, dqsPerByte = dqsPerByte))
   } else {
     Module(new UltraScaleDdrPhyIo(config,
-      dqsOutputDelayInitialValuePs = 375))
+      dqsOutputDelayInitialValuePs = 375, dqsPerByte = dqsPerByte))
   }
   phy.io.reset := reset.asBool
   phy.io.dividedClock := clock
@@ -80,12 +81,14 @@ class UltraScaleStandardDdrPhyIoHarness(memType: String, plus: Boolean)
   io.dqInputDelayValue := phy.io.dqInputDelayValue(0)
   io.dqOutputDelayValue := phy.io.dqOutputDelayValue(0)
   io.dataMaskOutputDelayValue := phy.io.dataMaskOutputDelayValue(0)
-  io.dqsOutputDelayValue := phy.io.dqsOutputDelayValue(0)
+  io.dqsOutputDelayValue := phy.io.dqsOutputDelayValue
   attach(io.clockPositive, phy.io.pads.clockPositive)
   attach(io.clockNegative, phy.io.pads.clockNegative)
   for (bit <- 0 until 8) attach(io.dq(bit), phy.io.pads.dq(bit))
-  attach(io.dqsPositive, phy.io.pads.dqsPositive(0))
-  attach(io.dqsNegative, phy.io.pads.dqsNegative(0))
+  for (strobe <- 0 until dqsPerByte) {
+    attach(io.dqsPositive(strobe), phy.io.pads.dqsPositive(strobe))
+    attach(io.dqsNegative(strobe), phy.io.pads.dqsNegative(strobe))
+  }
 }
 
 class UltraScaleStandardDdrPhyIoSpec extends AnyFlatSpec with ChiselScalatestTester {
@@ -107,7 +110,7 @@ class UltraScaleStandardDdrPhyIoSpec extends AnyFlatSpec with ChiselScalatestTes
         dut.io.dqInputDelayValue.expect(0.U)
         dut.io.dqOutputDelayValue.expect(0.U)
         dut.io.dataMaskOutputDelayValue.expect(0.U)
-        dut.io.dqsOutputDelayValue.expect(375.U)
+        dut.io.dqsOutputDelayValue(0).expect(375.U)
         dut.clock.step(2)
       }
   }
@@ -122,6 +125,18 @@ class UltraScaleStandardDdrPhyIoSpec extends AnyFlatSpec with ChiselScalatestTes
         dut.io.chipSelectN.poke("hff".U)
         dut.io.activateN.poke("hfc".U)
         dut.clock.step()
+      }
+  }
+
+  it should "replicate each byte strobe across both x4 DIMM DQS pairs" in {
+    test(new UltraScaleStandardDdrPhyIoHarness("DDR4", plus = false,
+      dqsPerByte = 2)).withAnnotations(verilator) { dut =>
+        dut.io.address0.poke("h01".U)
+        dut.io.chipSelectN.poke("hfe".U)
+        dut.io.activateN.poke("hff".U)
+        dut.io.dqsOutputDelayValue(0).expect(375.U)
+        dut.io.dqsOutputDelayValue(1).expect(375.U)
+        dut.clock.step(2)
       }
   }
 }
