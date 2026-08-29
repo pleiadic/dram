@@ -2,7 +2,10 @@
 
 This directory is an in-progress Chisel reconstruction of
 [LiteDRAM](../../litex/litedram). The detailed parity matrix and staged
-acceptance criteria are in [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md).
+acceptance criteria are in [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md). Release
+status is summarized in [SUPPORT_MATRIX.md](SUPPORT_MATRIX.md); integration
+and compatibility details are in [MIGRATION_GUIDE.md](MIGRATION_GUIDE.md) and
+[KNOWN_DIFFERENCES.md](KNOWN_DIFFERENCES.md).
 
 The new synthesizable control path is decomposed into `BankMachine`,
 `Refresher`, `CommandChooser`, `Multiplexer`, `LiteDramController`, and
@@ -48,10 +51,11 @@ The Chisel core maps these responsibilities as follows:
 | Compatibility simulation model | `DramController` |
 | DFI command encoding | `DfiSteerer` |
 
-This is not yet a drop-in replacement for LiteDRAM. Remaining compatibility
-work, including ECC-integrated Native wrappers, uncommon DIMM topologies,
-formal acceptance, and vendor toolchain smoke tests, is tracked in the
-development plan.
+This is not a source-level drop-in replacement for Migen LiteDRAM. Controller,
+frontend, initialization, ECC, and uncommon UltraScale DIMM topology behavior
+are implemented behind Chisel-native interfaces. Formal acceptance, FPGA
+device-library smoke tests, and board validation remain release gates and are
+tracked explicitly in the development plan and known-differences document.
 
 The frontend layer currently includes Native up/down width conversion, a
 Gray-pointer asynchronous Native CDC, Wishbone B4 with width conversion,
