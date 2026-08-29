@@ -56,6 +56,40 @@ class DramInitSpec extends AnyFlatSpec with Matchers {
     result.modeRegisters shouldBe Map(1 -> BigInt(769))
   }
 
+  it should "split clam-shell mode-register writes and swap bottom addresses" in {
+    val settings = DramInitSettings("DDR4", casLatency = 9,
+      writeLatency = 9, nPhases = 4)
+    val result = DramInit.generate(settings, timing, isClamShell = true)
+    result.steps.size shouldBe 17
+    val modeSteps = result.steps.filter(step =>
+      (step.command & modeRegister) == modeRegister)
+    modeSteps.size shouldBe 14
+    modeSteps.take(2) shouldBe Seq(
+      DramInitStep("Load Mode Register 3 for top", 0, 3,
+        modeRegister | commandChipSelectTop, 0),
+      DramInitStep("Load Mode Register 3 for bottom", 0, 3,
+        modeRegister | commandChipSelectBottom, 0))
+    val mr1 = modeSteps.filter(_.description.startsWith("Load Mode Register 1"))
+    mr1.map(_.address) shouldBe Seq(BigInt(769), BigInt(641))
+    mr1.map(_.bank) shouldBe Seq(1, 2)
+    modeSteps.takeRight(2).map(_.delayCycles) shouldBe Seq(200, 200)
+  }
+
+  it should "repeat DDR4 RDIMM initialization for the inverted RCD B-side" in {
+    val settings = DramInitSettings("DDR4", casLatency = 9,
+      writeLatency = 9, nPhases = 4,
+      rdimm = Some(DramRdimmSettings(tckPs = 1250)))
+    val result = DramInit.generate(settings, timing)
+    result.steps.size shouldBe 20
+    result.steps.take(2) shouldBe Seq(
+      DramInitStep("Release reset", 0, 0, unreset, 50000),
+      DramInitStep("Release reset for RCD B-side", 0x2bf8, 15,
+        unreset, 50000))
+    val mr1 = result.steps.filter(_.description.startsWith("Load Mode Register 1"))
+    mr1.map(_.address) shouldBe Seq(BigInt(769), BigInt(0x28f9))
+    mr1.map(_.bank) shouldBe Seq(1, 14)
+  }
+
   it should "cover DDR, LPDDR, and DDR2 sequence differences" in {
     val ddr = DramInit.generate(DramInitSettings("DDR", 3), timing)
     val lpddr = DramInit.generate(DramInitSettings("LPDDR", 3), timing)

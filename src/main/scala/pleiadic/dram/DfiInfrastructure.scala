@@ -7,6 +7,8 @@ import scala.language.reflectiveCalls
 class DfiSoftwarePhase(config: DramConfig) extends Bundle {
   val issue = Bool()
   val chipSelect = Bool()
+  val chipSelectTop = Bool()
+  val chipSelectBottom = Bool()
   val writeEnable = Bool()
   val columnStrobe = Bool()
   val rowStrobe = Bool()
@@ -41,7 +43,17 @@ class Ddr4DfiMux(config: DramConfig) extends Module {
 }
 
 /** Hardware/external/software DFI selector with CSR-like phase injection inputs. */
-class DfiInjector(config: DramConfig) extends Module {
+class DfiInjector(config: DramConfig, isClamShell: Boolean = false)
+    extends Module {
+  require(!isClamShell || config.memType == "DDR4",
+    "clam-shell topology is supported only for DDR4")
+  val masterConfig: DramConfig = if (isClamShell) {
+    // The physical DFI has one extra rank-select bit, while the controller's
+    // logical Native address space remains unchanged.
+    config.copy(addressBits = config.addressBits + 1,
+      nranks = config.nranks * 2)
+  } else config
+
   val io = IO(new Bundle {
     val hardware = Input(new DfiInterface(config))
     val external = Input(new DfiInterface(config))
@@ -52,12 +64,41 @@ class DfiInjector(config: DramConfig) extends Module {
     val resetN = Input(Bool())
     val software = Input(Vec(config.nPhases, new DfiSoftwarePhase(config)))
     val phyRead = Input(Vec(config.nPhases, new DfiReadResponse(config)))
-    val master = Output(new DfiInterface(config))
+    val master = Output(new DfiInterface(masterConfig))
     val capturedRead = Output(Vec(config.nPhases, UInt(config.dfiDataBits.W)))
   })
 
-  private val softwareDfi = Wire(new DfiInterface(config))
-  softwareDfi := 0.U.asTypeOf(new DfiInterface(config))
+  private def expandRanks(source: DfiInterface): DfiInterface = {
+    val expanded = Wire(new DfiInterface(masterConfig))
+    expanded := 0.U.asTypeOf(new DfiInterface(masterConfig))
+    for (phaseIndex <- 0 until config.nPhases) {
+      val input = source.phases(phaseIndex)
+      val output = expanded.phases(phaseIndex)
+      output.address := input.address
+      output.bank := input.bank
+      output.rasN := input.rasN
+      output.casN := input.casN
+      output.weN := input.weN
+      output.actN := input.actN
+      output.resetN := input.resetN
+      output.rddataEn := input.rddataEn
+      output.wrdataEn := input.wrdataEn
+      output.wrdata := input.wrdata
+      output.wrdataMask := input.wrdataMask
+      for (rank <- 0 until masterConfig.nranks) {
+        val logicalRank = if (isClamShell) rank / 2 else rank
+        output.csN(rank) := input.csN(logicalRank)
+        output.cke(rank) := input.cke(logicalRank)
+        output.odt(rank) := input.odt(logicalRank)
+      }
+    }
+    expanded
+  }
+
+  private val hardwareDfi = expandRanks(io.hardware)
+  private val externalDfi = expandRanks(io.external)
+  private val softwareDfi = Wire(new DfiInterface(masterConfig))
+  softwareDfi := 0.U.asTypeOf(new DfiInterface(masterConfig))
   for (phaseIndex <- 0 until config.nPhases) {
     val control = io.software(phaseIndex)
     val phase = softwareDfi.phases(phaseIndex)
@@ -76,7 +117,14 @@ class DfiInjector(config: DramConfig) extends Module {
     phase.wrdataEn := control.issue && control.writeDataEnable
     phase.rddataEn := control.issue && control.readDataEnable
     when(control.issue) {
-      phase.csN.foreach(_ := !control.chipSelect)
+      for (rank <- 0 until masterConfig.nranks) {
+        val selected = if (isClamShell) {
+          val top = rank % 2 == 0
+          control.chipSelect || (if (top) control.chipSelectTop
+            else control.chipSelectBottom)
+        } else control.chipSelect
+        phase.csN(rank) := !selected
+      }
       phase.weN := !control.writeEnable
       phase.casN := !control.columnStrobe
       phase.rasN := !control.rowStrobe
@@ -84,7 +132,7 @@ class DfiInjector(config: DramConfig) extends Module {
   }
 
   io.master := Mux(io.hardwareControl,
-    Mux(io.useExternal, io.external, io.hardware), softwareDfi)
+    Mux(io.useExternal, externalDfi, hardwareDfi), softwareDfi)
   private val captured = RegInit(VecInit(Seq.fill(config.nPhases)(0.U(config.dfiDataBits.W))))
   for (phase <- 0 until config.nPhases) {
     io.master.phases(phase).rddata := io.phyRead(phase).data

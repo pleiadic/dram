@@ -109,6 +109,8 @@ class DfiInfrastructureSpec extends AnyFlatSpec with ChiselScalatestTester {
         val software = dut.io.software(index)
         software.issue.poke(false.B)
         software.chipSelect.poke(false.B)
+        software.chipSelectTop.poke(false.B)
+        software.chipSelectBottom.poke(false.B)
         software.writeEnable.poke(false.B)
         software.columnStrobe.poke(false.B)
         software.rowStrobe.poke(false.B)
@@ -156,6 +158,56 @@ class DfiInfrastructureSpec extends AnyFlatSpec with ChiselScalatestTester {
       dut.clock.step()
       dut.io.phyRead(0).valid.poke(false.B)
       dut.io.capturedRead(0).expect("h5678".U)
+    }
+  }
+
+  it should "broadcast hardware ranks and independently select clam-shell halves" in {
+    val clamConfig = cfg.copy(memType = "DDR4", nranks = 1)
+    test(new DfiInjector(clamConfig, isClamShell = true)) { dut =>
+      dut.io.hardware.phases.foreach(clearPhase)
+      dut.io.external.phases.foreach(clearPhase)
+      dut.io.hardwareControl.poke(true.B)
+      dut.io.useExternal.poke(false.B)
+      dut.io.clockEnable.poke(true.B)
+      dut.io.onDieTermination.poke(false.B)
+      dut.io.resetN.poke(true.B)
+      for (index <- 0 until clamConfig.nPhases) {
+        val software = dut.io.software(index)
+        software.issue.poke(false.B)
+        software.chipSelect.poke(false.B)
+        software.chipSelectTop.poke(false.B)
+        software.chipSelectBottom.poke(false.B)
+        software.writeEnable.poke(false.B)
+        software.columnStrobe.poke(false.B)
+        software.rowStrobe.poke(false.B)
+        software.writeDataEnable.poke(false.B)
+        software.readDataEnable.poke(false.B)
+        software.address.poke(0.U)
+        software.bank.poke(0.U)
+        software.writeData.poke(0.U)
+        dut.io.phyRead(index).data.poke(0.U)
+        dut.io.phyRead(index).valid.poke(false.B)
+      }
+
+      dut.io.hardware.phases(0).csN(0).poke(false.B)
+      dut.io.hardware.phases(0).cke(0).poke(true.B)
+      dut.io.hardware.phases(0).odt(0).poke(true.B)
+      dut.io.master.phases(0).csN.foreach(_.expect(false.B))
+      dut.io.master.phases(0).cke.foreach(_.expect(true.B))
+      dut.io.master.phases(0).odt.foreach(_.expect(true.B))
+
+      dut.io.hardwareControl.poke(false.B)
+      val software = dut.io.software(0)
+      software.issue.poke(true.B)
+      software.chipSelectTop.poke(true.B)
+      dut.io.master.phases(0).csN(0).expect(false.B)
+      dut.io.master.phases(0).csN(1).expect(true.B)
+      software.chipSelectTop.poke(false.B)
+      software.chipSelectBottom.poke(true.B)
+      dut.io.master.phases(0).csN(0).expect(true.B)
+      dut.io.master.phases(0).csN(1).expect(false.B)
+      software.chipSelect.poke(true.B)
+      dut.io.master.phases(0).csN.foreach(_.expect(false.B))
     }
   }
 

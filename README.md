@@ -202,8 +202,12 @@ trainable delay groups; DQS accepts the quarter-cycle phase offset in
 picoseconds. Use the portable standard PHY's one-cycle output-enable setting
 for this E3 boundary. The pad bundle supports either one DQS pair per byte for
 x8 components or two identically driven, independently observable physical DQS
-pairs per byte for x4 DIMMs. Registered/clam-shell and multi-pad-group board
-topologies remain wrapper extensions.
+pairs per byte for x4 DIMMs. The DFI injector can expose two physical chip
+selects per logical rank for DDR4 clam-shell boards, broadcasting normal
+controller traffic while retaining independent top/bottom software selects.
+Initialization tables split clam-shell mode-register writes with the required
+bottom-side address/bank swaps and repeat RDIMM commands with the RCD B-side
+inversion masks. Multi-pad-group board assembly remains a wrapper extension.
 
 The ECP5 DDR3 PHY provides a half-rate two-phase DFI boundary with four DQ
 edges per phase. It emits each BL8 write over two x2 primitive words, joins two

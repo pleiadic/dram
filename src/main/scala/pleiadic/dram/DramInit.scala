@@ -13,6 +13,8 @@ object DfiiEncoding {
   val commandRowStrobe = 0x08
   val commandWriteData = 0x10
   val commandReadData = 0x20
+  val commandChipSelectTop = 0x40
+  val commandChipSelectBottom = 0x80
 
   val prechargeAll = commandRowStrobe | commandWriteEnable | commandChipSelect
   val modeRegister = commandRowStrobe | commandColumnStrobe |
@@ -34,6 +36,18 @@ case class DramInitResult(
   steps: Seq[DramInitStep],
   modeRegisters: Map[Int, BigInt] = Map.empty)
 
+/** DDR4 registered-DIMM clock and register-control-device settings. */
+case class DramRdimmSettings(
+  tckPs: Int,
+  rcdPllBypass: Boolean = false,
+  rcdCaCsDrive: Int = 5,
+  rcdOdtCkeDrive: Int = 5,
+  rcdClockDrive: Int = 5) {
+  require(tckPs > 0)
+  require(Seq(rcdCaCsDrive, rcdOdtCkeDrive, rcdClockDrive)
+    .forall(value => value >= 0 && value <= 7))
+}
+
 /** PHY parameters that affect JEDEC mode-register programming. */
 case class DramInitSettings(
   memType: String,
@@ -54,9 +68,12 @@ case class DramInitSettings(
   vrefDqPercent: Double = 30.4,
   wckCkRatio: Int = 2,
   socOdt: String = "disable",
-  wckOdt: String = "disable") {
+  wckOdt: String = "disable",
+  rdimm: Option[DramRdimmSettings] = None) {
   require(casLatency > 0 && writeLatency >= 0 && nPhases > 0)
   require(tdqs == 0 || tdqs == 1)
+  require(rdimm.isEmpty || memType.equalsIgnoreCase("DDR4"),
+    "RDIMM settings are supported only for DDR4")
 }
 
 /**
@@ -81,8 +98,9 @@ object DramInit {
     values.getOrElse(value,
       throw new IllegalArgumentException(s"unsupported $name value: $value"))
 
-  def generate(settings: DramInitSettings, timing: DramTiming): DramInitResult =
-    settings.memType.toUpperCase match {
+  def generate(settings: DramInitSettings, timing: DramTiming,
+      isClamShell: Boolean = false): DramInitResult = {
+    val result = settings.memType.toUpperCase match {
       case "SDR" => sdr(settings)
       case "DDR" => ddrLike(settings, lpddr = false)
       case "LPDDR" => ddrLike(settings, lpddr = true)
@@ -95,6 +113,56 @@ object DramInit {
       case other => throw new IllegalArgumentException(
         s"initialization sequence for $other is not implemented")
     }
+    val registered = if (settings.rdimm.nonEmpty) rdimm(result) else result
+    if (isClamShell) {
+      require(settings.memType.equalsIgnoreCase("DDR4"),
+        "clam-shell initialization is supported only for DDR4")
+      clamShell(registered)
+    } else registered
+  }
+
+  private val rdimmAddressInvertMask = BigInt("10101111111000", 2)
+  private val rdimmBankInvertMask = 0xf
+
+  private def rdimm(result: DramInitResult): DramInitResult = {
+    val steps = result.steps.flatMap { value =>
+      if (value.bank == 7) Seq(value)
+      else Seq(value, value.copy(
+        description = s"${value.description} for RCD B-side",
+        address = value.address ^ rdimmAddressInvertMask,
+        bank = value.bank ^ rdimmBankInvertMask))
+    }
+    result.copy(steps = steps)
+  }
+
+  private def swap(value: BigInt, left: Int, right: Int): BigInt = {
+    val leftBit = value.testBit(left)
+    val rightBit = value.testBit(right)
+    var result = value
+    if (leftBit != rightBit) {
+      result = result.flipBit(left).flipBit(right)
+    }
+    result
+  }
+
+  private def clamShell(result: DramInitResult): DramInitResult = {
+    val steps = result.steps.flatMap { value =>
+      if (value.command == modeRegister) {
+        val bottomAddress = Seq((3, 4), (5, 6), (7, 8), (11, 13))
+          .foldLeft(value.address) { case (address, (left, right)) =>
+            swap(address, left, right)
+          }
+        val bottomBank = swap(BigInt(value.bank), 0, 1).toInt
+        Seq(
+          value.copy(description = s"${value.description} for top",
+            command = value.command | commandChipSelectTop),
+          value.copy(description = s"${value.description} for bottom",
+            address = bottomAddress, bank = bottomBank,
+            command = value.command | commandChipSelectBottom))
+      } else Seq(value)
+    }
+    result.copy(steps = steps)
+  }
 
   private def sdr(settings: DramInitSettings): DramInitResult = {
     val cl = settings.casLatency
